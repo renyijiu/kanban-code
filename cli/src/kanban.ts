@@ -370,11 +370,16 @@ function assertTmuxResult(step: string, result: { ok: boolean; error?: string })
   }
 }
 
+function sleepSeconds(seconds: number): void {
+  execSync(`sleep ${Math.max(0, seconds)}`);
+}
+
 program
   .command("self-compact")
   .description("Send /compact to this agent's own Kanban Code tmux session")
-  .argument("[followUp...]", "Optional post-compact prompt. Quote it, or pipe/heredoc multi-line text on stdin.")
+  .option("--follow-up-delay <seconds>", "Seconds to wait after /compact before sending the follow-up", "2")
   .option("-j, --json", "Output as JSON")
+  .argument("[followUp...]", "Optional post-compact prompt. Quote it, or pipe/heredoc multi-line text on stdin.")
   .addHelpText(
     "after",
     `
@@ -392,6 +397,7 @@ Examples:
     try {
       const { card, tmuxSession } = selfCompactTarget();
       const followUp = readFollowUpFromArgsOrStdin(followUpArgs);
+      const followUpDelay = Number.parseFloat(opts.followUpDelay);
 
       // Flush any pending text, leave transient UI states, request compaction,
       // then provide the optional post-compact continuation prompt.
@@ -399,6 +405,7 @@ Examples:
       assertTmuxResult("send Escape", sendTmuxEscape(tmuxSession));
       assertTmuxResult("send /compact", sendTmuxKeys(tmuxSession, "/compact"));
       if (followUp.trim().length > 0) {
+        sleepSeconds(Number.isFinite(followUpDelay) ? followUpDelay : 2);
         assertTmuxResult("send post-compact prompt", pasteTmuxPrompt(tmuxSession, followUp));
       }
 

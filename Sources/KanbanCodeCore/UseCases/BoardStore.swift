@@ -1874,6 +1874,8 @@ public final class BoardStore: @unchecked Sendable {
     private var isReconciling = false
     private var lastGHLookup: ContinuousClock.Instant = .now - .seconds(600)
     private var ghRateLimitedUntil: ContinuousClock.Instant = .now
+    private var lastAutoBranchDiscovery: ContinuousClock.Instant = .now - .seconds(120)
+    private var lastAutoBranchDiscoveryByCard: [String: ContinuousClock.Instant] = [:]
     public var appIsActive: Bool = true
     /// Cached worktree results by repo root. The fingerprint pairs the
     /// `.git/worktrees/` dir mtime (changes on add/remove) with the max
@@ -2158,6 +2160,22 @@ public final class BoardStore: @unchecked Sendable {
                 existingLinks[i].manualOverrides.branchWatermark = fileSize
             }
 
+            // Automatic branch discovery for recently active in-progress cards.
+            // This intentionally scans at most one card per pass and is throttled
+            // separately from PR refresh. Manual "Discover Branches and PRs" still
+            // does the full eager scan for a single card.
+            var earlyActivityMap: [String: ActivityState] = [:]
+            if let activityDetector {
+                for link in existingLinks {
+                    guard let sessionId = link.sessionLink?.sessionId else { continue }
+                    earlyActivityMap[sessionId] = await activityDetector.activityState(for: sessionId)
+                }
+            }
+            await autoDiscoverBranchesForRecentlyActiveCards(
+                links: &existingLinks,
+                activityMap: earlyActivityMap
+            )
+
             // Collect branches + PR numbers from active cards only (inProgress..done).
             // We skip backlog (no PRs yet) and allSessions (archived, don't need refresh).
             let activeColumns: Set<KanbanCodeColumn> = [.inProgress, .waiting, .inReview, .done]
@@ -2286,10 +2304,11 @@ public final class BoardStore: @unchecked Sendable {
 
             // Build activity map
             let t4 = ContinuousClock.now
-            var activityMap: [String: ActivityState] = [:]
+            var activityMap = earlyActivityMap
             for link in mergedLinks {
                 if let sessionId = link.sessionLink?.sessionId {
-                    if let activity = await activityDetector?.activityState(for: sessionId) {
+                    if activityMap[sessionId] == nil,
+                       let activity = await activityDetector?.activityState(for: sessionId) {
                         activityMap[sessionId] = activity
                     }
                 }
@@ -2329,6 +2348,84 @@ public final class BoardStore: @unchecked Sendable {
             dispatch(.setError(error.localizedDescription))
             dispatch(.setLoading(false))
         }
+    }
+
+    private func autoDiscoverBranchesForRecentlyActiveCards(
+        links: inout [Link],
+        activityMap: [String: ActivityState]
+    ) async {
+        let now = ContinuousClock.now
+        guard now - lastAutoBranchDiscovery >= .seconds(120) else { return }
+
+        let recentCutoff = Date.now.addingTimeInterval(-30 * 60)
+        var candidates: [(index: Int, activityDate: Date)] = []
+        for i in links.indices {
+            let link = links[i]
+            guard link.column == .inProgress,
+                  let session = link.sessionLink,
+                  let sessionPath = session.sessionPath,
+                  !sessionPath.isEmpty else { continue }
+
+            let activity = activityMap[session.sessionId]
+            let lastActivity = link.lastActivity ?? link.updatedAt
+            let isRecentlyActive = activity == .activelyWorking || lastActivity >= recentCutoff
+            guard isRecentlyActive else { continue }
+
+            if let lastScan = lastAutoBranchDiscoveryByCard[link.id],
+               now - lastScan < .seconds(600) {
+                continue
+            }
+
+            candidates.append((i, lastActivity))
+        }
+
+        guard let candidate = candidates.max(by: { $0.activityDate < $1.activityDate }) else { return }
+        let i = candidate.index
+        let link = links[i]
+        guard let sessionPath = link.sessionLink?.sessionPath else { return }
+
+        let scanned: [JsonlParser.DiscoveredBranch]
+        do {
+            switch link.effectiveAssistant {
+            case .claude, .gemini:
+                if let latest = try await JsonlParser.extractLatestPushedBranch(from: sessionPath) {
+                    scanned = [latest]
+                } else {
+                    scanned = []
+                }
+            case .codex:
+                scanned = try await CodexSessionParser.extractPushedBranches(from: sessionPath)
+            }
+        } catch {
+            lastAutoBranchDiscovery = now
+            lastAutoBranchDiscoveryByCard[link.id] = now
+            return
+        }
+
+        lastAutoBranchDiscovery = now
+        lastAutoBranchDiscoveryByCard[link.id] = now
+        lastAutoBranchDiscoveryByCard = lastAutoBranchDiscoveryByCard.filter { cardId, _ in
+            links.contains { $0.id == cardId }
+        }
+        guard !scanned.isEmpty else { return }
+
+        var branches = links[i].discoveredBranches ?? []
+        var repos = links[i].discoveredRepos ?? [:]
+        for discovered in scanned {
+            if !branches.contains(discovered.branch) {
+                branches.append(discovered.branch)
+            }
+            if let repo = discovered.repoPath,
+               repo != links[i].projectPath {
+                repos[discovered.branch] = repo
+            }
+        }
+        links[i].discoveredBranches = branches
+        links[i].discoveredRepos = repos.isEmpty ? nil : repos
+        KanbanCodeLog.info(
+            "reconcile",
+            "auto branch discovery: card=\(link.id.prefix(12)) branches=\(scanned.map(\.branch).joined(separator: ","))"
+        )
     }
 
     // MARK: - GitHub Issues
