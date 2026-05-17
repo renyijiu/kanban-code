@@ -117,8 +117,6 @@ struct ContentView: View {
     @State var channelGithubBaseURLByCardId: [String: String] = [:]
     @State var channelDraftImages: [String: [Data]] = [:]
     @State var dmDraftImages: [String: [Data]] = [:]
-    @State var isToolbarMerging = false
-    @State var toolbarMergeError: String?
     @State private var selfCompactTriggeredThresholds: [String: Set<Int>] = [:]
     @State private var navigationBackStack: [DrawerNavigationTarget] = []
     @State private var navigationForwardStack: [DrawerNavigationTarget] = []
@@ -1376,47 +1374,13 @@ struct ContentView: View {
                         }
                     }
 
-                    if let pr = card.link.mergeablePR {
+                    if !card.link.prLinks.isEmpty {
                         ToolbarItem(placement: .primaryAction) {
-                            Button {
-                                guard !isToolbarMerging, let repoRoot = card.link.projectPath else { return }
-                                isToolbarMerging = true
-                                toolbarMergeError = nil
-                                Task {
-                                    let gh = GhCliAdapter()
-                                    let settings = try await SettingsStore().read()
-                                    let result = try await gh.mergePR(repoRoot: repoRoot, prNumber: pr.number, commandTemplate: settings.github.mergeCommand)
-                                    isToolbarMerging = false
-                                    switch result {
-                                    case .success:
-                                        store.dispatch(.markPRMerged(cardId: card.id, prNumber: pr.number))
-                                    case .failure(let msg):
-                                        toolbarMergeError = msg
-                                    }
-                                }
-                            } label: {
-                                HStack(spacing: 4) {
-                                    if isToolbarMerging {
-                                        ProgressView().controlSize(.small)
-                                    } else {
-                                        Image(systemName: "arrow.triangle.merge")
-                                    }
-                                    Text("Merge")
-                                }
-                                .font(.app(size: 13))
-                                .foregroundStyle(Color.green.opacity(0.8))
-                                .padding(.horizontal, 12)
-                                .padding(.vertical, 6)
-                                .background(Color.green.opacity(0.08), in: Capsule())
-                            }
-                            .buttonStyle(.plain)
-                            .disabled(isToolbarMerging)
-                            .help("Merge PR #\(pr.number)")
-                            .popover(isPresented: .init(get: { toolbarMergeError != nil }, set: { if !$0 { toolbarMergeError = nil } })) {
-                                if let err = toolbarMergeError {
-                                    Text(err).font(.app(.caption)).padding(8).frame(maxWidth: 300)
-                                }
-                            }
+                            PRBadgeStrip(
+                                prLinks: card.link.prLinks,
+                                projectPath: card.link.projectPath,
+                                maxWidth: 360
+                            )
                         }
                     }
 

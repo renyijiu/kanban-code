@@ -65,7 +65,7 @@ struct PRTabView: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 12) {
-                ForEach(Array(card.link.prLinks.enumerated()), id: \.element.number) { index, pr in
+                ForEach(Array(card.link.prLinks.sortedByPRNumber.enumerated()), id: \.element.number) { index, pr in
                     if index > 0 { Divider().padding(.vertical, 4) }
 
                     // Header: title + badge

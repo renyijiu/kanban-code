@@ -124,7 +124,7 @@ struct CardDetailView: View {
     // Resolved GitHub base URL for constructing issue/PR links
     @State private var githubBaseURL: String?
 
-    // PR body loading and merge state moved to PRTabView and MergeButton
+    // PR body loading lives in PRTabView.
 
     // Queued prompts
     @State private var queuedPromptItem: QueuedPromptItem?
@@ -1407,11 +1407,13 @@ struct CardDetailView: View {
                 Spacer(minLength: 8)
 
                 HStack(spacing: 8) {
-                    if let primary = card.link.prLink {
-                        PRSummaryPill(prLinks: card.link.prLinks, primary: primary)
-                    }
-                    if let mergePR = card.link.mergeablePR {
-                        MergeButton(pr: mergePR, projectPath: card.link.projectPath, onMerged: { onPRMerged($0) }, onToast: showCopyToast)
+                    if !card.link.prLinks.isEmpty {
+                        PRBadgeStrip(
+                            prLinks: card.link.prLinks,
+                            githubBaseURL: githubBaseURL,
+                            projectPath: card.link.projectPath,
+                            maxWidth: 240
+                        )
                     }
                     if card.link.tmuxLink == nil {
                         let hasSession = card.link.sessionLink != nil
@@ -1485,7 +1487,7 @@ struct CardDetailView: View {
                 if let worktreePath = card.link.worktreeLink?.path, !worktreePath.isEmpty {
                     copyableRow(icon: "folder", text: worktreePath)
                 }
-                ForEach(card.link.prLinks, id: \.number) { pr in
+                ForEach(card.link.prLinks.sortedByPRNumber, id: \.number) { pr in
                     let detail = pr.status.map { " · \($0.rawValue)" } ?? ""
                     let prURL = pr.url ?? githubBaseURL.map { GitRemoteResolver.prURL(base: $0, number: pr.number) }
                     linkPropertyRow(icon: "arrow.triangle.pull", label: "PR", value: "#\(String(pr.number))\(detail)", url: prURL, onUnlink: { onUnlink(.pr(number: pr.number)) })

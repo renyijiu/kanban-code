@@ -46,3 +46,69 @@ struct PRBadge: View {
         }
     }
 }
+
+extension Collection where Element == PRLink {
+    var sortedByPRNumber: [PRLink] {
+        sorted {
+            if $0.number != $1.number { return $0.number < $1.number }
+            return ($0.url ?? "") < ($1.url ?? "")
+        }
+    }
+}
+
+struct PRBadgeStrip: View {
+    let prLinks: [PRLink]
+    var githubBaseURL: String?
+    var projectPath: String?
+    var maxWidth: CGFloat?
+
+    var body: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 6) {
+                ForEach(prLinks.sortedByPRNumber, id: \.number) { pr in
+                    Button {
+                        openPullRequest(pr)
+                    } label: {
+                        PRBadge(
+                            status: pr.status,
+                            prNumber: pr.number,
+                            unresolvedThreads: pr.unresolvedThreads ?? 0
+                        )
+                    }
+                    .buttonStyle(.plain)
+                    .help(helpText(for: pr))
+                }
+            }
+        }
+        .frame(maxWidth: maxWidth)
+    }
+
+    private func helpText(for pr: PRLink) -> String {
+        var parts = ["Open PR #\(pr.number)"]
+        if let status = pr.status {
+            parts.append(status.rawValue)
+        }
+        if let title = pr.title, !title.isEmpty {
+            parts.append(title)
+        }
+        return parts.joined(separator: " - ")
+    }
+
+    private func openPullRequest(_ pr: PRLink) {
+        if let url = resolvedPRURL(pr, githubBaseURL: githubBaseURL) {
+            NSWorkspace.shared.open(url)
+            return
+        }
+
+        guard let projectPath else { return }
+        Task {
+            guard let base = await GitRemoteResolver.shared.githubBaseURL(for: projectPath),
+                  let url = URL(string: GitRemoteResolver.prURL(base: base, number: pr.number)) else {
+                return
+            }
+            _ = await MainActor.run {
+                NSWorkspace.shared.open(url)
+            }
+        }
+    }
+}

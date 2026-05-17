@@ -105,10 +105,10 @@ struct CardActionsMenu: View {
                 Label("Branch: \(branch)", systemImage: "arrow.triangle.branch")
             }
         }
-        ForEach(card.link.prLinks, id: \.number) { pr in
+        ForEach(card.link.prLinks.sortedByPRNumber, id: \.number) { pr in
             let detail = pr.status.map { " · \($0.rawValue)" } ?? ""
             Menu {
-                if let url = pr.url.flatMap({ URL(string: $0) }) {
+                if let url = resolvedPRURL(pr, githubBaseURL: githubBaseURL) {
                     Button("Open on GitHub") { NSWorkspace.shared.open(url) }
                 }
                 Button("Copy PR Number") { copyToClipboard("#\(String(pr.number))") }
@@ -209,9 +209,9 @@ struct CardActionsMenu: View {
     private var linksSection: some View {
         Group {
             Divider()
-            ForEach(card.link.prLinks, id: \.number) { pr in
+            ForEach(card.link.prLinks.sortedByPRNumber, id: \.number) { pr in
                 Button {
-                    if let url = pr.url.flatMap({ URL(string: $0) }) { NSWorkspace.shared.open(url) }
+                    if let url = resolvedPRURL(pr, githubBaseURL: githubBaseURL) { NSWorkspace.shared.open(url) }
                 } label: {
                     Label("Open PR #\(String(pr.number))", systemImage: "arrow.up.right.square")
                 }
