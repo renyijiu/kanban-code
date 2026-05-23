@@ -2040,15 +2040,47 @@ public final class BoardStore: @unchecked Sendable {
     /// no worktree scan, no PR fetch. Runs in <1ms.
     public func refreshActivity() async {
         guard let activityDetector else { return }
-        var activityMap: [String: ActivityState] = [:]
-        for (_, link) in state.links {
-            guard let sessionId = link.sessionLink?.sessionId else { continue }
-            let activity = await activityDetector.activityState(for: sessionId)
-            activityMap[sessionId] = activity
-        }
-        if !activityMap.isEmpty {
+        let activityMap = await currentActivityMap(
+            sessions: Array(state.sessions.values),
+            detector: activityDetector
+        )
+        if state.activityMap != activityMap {
             dispatch(.activityChanged(activityMap))
         }
+    }
+
+    private func currentActivityMap(
+        sessions: [Session],
+        detector: ActivityDetector
+    ) async -> [String: ActivityState] {
+        let sessionPaths: [String: String] = Dictionary(
+            uniqueKeysWithValues: sessions.compactMap { session in
+                guard let path = session.jsonlPath else { return nil }
+                return (session.id, path)
+            }
+        )
+        guard !sessionPaths.isEmpty else { return [:] }
+
+        // Poll first to seed per-detector path/mtime caches, then ask for the
+        // resolved state so hook-confirmed activity can still win for Claude and Gemini.
+        _ = await detector.pollActivity(sessionPaths: sessionPaths)
+
+        var activityMap: [String: ActivityState] = [:]
+        for sessionId in sessionPaths.keys {
+            let activity = await detector.activityState(for: sessionId)
+            if activity != .stale {
+                activityMap[sessionId] = activity
+            }
+        }
+        return activityMap
+    }
+
+    private func activitySummary(_ activityMap: [String: ActivityState]) -> String {
+        let working = activityMap.values.filter { $0 == .activelyWorking }.count
+        let needsAttention = activityMap.values.filter { $0 == .needsAttention }.count
+        let idle = activityMap.values.filter { $0 == .idleWaiting }.count
+        let ended = activityMap.values.filter { $0 == .ended }.count
+        return "\(activityMap.count) tracked, \(working) working, \(needsAttention) attention, \(idle) idle, \(ended) ended"
     }
 
     // MARK: - Eager settings load
@@ -2209,10 +2241,10 @@ public final class BoardStore: @unchecked Sendable {
             // does the full eager scan for a single card.
             var earlyActivityMap: [String: ActivityState] = [:]
             if let activityDetector {
-                for link in existingLinks {
-                    guard let sessionId = link.sessionLink?.sessionId else { continue }
-                    earlyActivityMap[sessionId] = await activityDetector.activityState(for: sessionId)
-                }
+                earlyActivityMap = await currentActivityMap(
+                    sessions: sessions,
+                    detector: activityDetector
+                )
             }
             await autoDiscoverBranchesForRecentlyActiveCards(
                 links: &existingLinks,
@@ -2347,16 +2379,8 @@ public final class BoardStore: @unchecked Sendable {
 
             // Build activity map
             let t4 = ContinuousClock.now
-            var activityMap = earlyActivityMap
-            for link in mergedLinks {
-                if let sessionId = link.sessionLink?.sessionId {
-                    if activityMap[sessionId] == nil,
-                       let activity = await activityDetector?.activityState(for: sessionId) {
-                        activityMap[sessionId] = activity
-                    }
-                }
-            }
-            KanbanCodeLog.info("reconcile", "activityMap: \(t4.duration(to: .now)) (\(activityMap.count) active)")
+            let activityMap = earlyActivityMap
+            KanbanCodeLog.info("reconcile", "activityMap: \(t4.duration(to: .now)) (\(activitySummary(activityMap)))")
 
             // Compute discovered project paths
             let sessionPaths = mergedLinks.map { $0.projectPath }
