@@ -133,6 +133,7 @@ struct PromptEditor: NSViewRepresentable {
         // Recalculate intrinsic height after text/font changes
         scrollView.onHeightChange = onHeightChange
         scrollView.recalcIntrinsicHeight()
+        scrollView.scheduleRecalcIntrinsicHeight()
     }
 
     @MainActor class Coordinator: NSObject, NSTextViewDelegate {
@@ -151,7 +152,10 @@ struct PromptEditor: NSViewRepresentable {
             parent.text = textView.string
             updatePlaceholder(textView)
             // Recalculate height when user types
-            (textView.enclosingScrollView as? PromptEditorScrollView)?.recalcIntrinsicHeight()
+            if let scrollView = textView.enclosingScrollView as? PromptEditorScrollView {
+                scrollView.recalcIntrinsicHeight()
+                scrollView.scheduleRecalcIntrinsicHeight()
+            }
             textView.scrollRangeToVisible(textView.selectedRange())
         }
 
@@ -170,6 +174,8 @@ struct PromptEditor: NSViewRepresentable {
 /// Height is capped at `maxContentHeight` so the view scrolls instead of overflowing.
 final class PromptEditorScrollView: NSScrollView {
     private var contentHeight: CGFloat = 80
+    private var lastMeasuredWidth: CGFloat = 320
+    private var pendingRecalc = false
     private let maxContentHeight: CGFloat
     var onHeightChange: (CGFloat) -> Void = { _ in }
 
@@ -193,19 +199,24 @@ final class PromptEditorScrollView: NSScrollView {
               let textContainer = textView.textContainer else { return }
 
         let measuredWidth = [
+            contentView.documentVisibleRect.width,
             contentView.bounds.width,
             bounds.width,
             superview?.bounds.width ?? 0,
-            window?.contentView?.bounds.width ?? 0,
-        ].first { $0 > 8 } ?? 1
-        let contentWidth = max(1, measuredWidth)
+        ].first { $0 > 8 }
+        if let measuredWidth {
+            lastMeasuredWidth = measuredWidth
+        }
 
+        let contentWidth = max(1, lastMeasuredWidth)
+        let textInsets = textView.textContainerInset.width * 2
         textContainer.containerSize = NSSize(
-            width: contentWidth,
+            width: max(1, contentWidth - textInsets),
             height: CGFloat.greatestFiniteMagnitude
         )
         textView.frame.size.width = contentWidth
 
+        textView.layoutSubtreeIfNeeded()
         layoutManager.ensureLayout(for: textContainer)
         let textHeight = layoutManager.usedRect(for: textContainer).height
             + textView.textContainerInset.height * 2
@@ -220,6 +231,16 @@ final class PromptEditorScrollView: NSScrollView {
                 guard let self else { return }
                 self.onHeightChange(self.contentHeight)
             }
+        }
+    }
+
+    func scheduleRecalcIntrinsicHeight() {
+        guard !pendingRecalc else { return }
+        pendingRecalc = true
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.pendingRecalc = false
+            self.recalcIntrinsicHeight()
         }
     }
 
@@ -333,7 +354,7 @@ final class SubmitTextView: NSTextView {
                 if let delegate = self.delegate as? PromptEditor.Coordinator {
                     delegate.parent.text = replacement
                 }
-                (enclosingScrollView as? PromptEditorScrollView)?.recalcIntrinsicHeight()
+                refreshEditorHeightAfterProgrammaticChange()
                 needsDisplay = true
                 return
             }
@@ -395,6 +416,7 @@ final class SubmitTextView: NSTextView {
     override func paste(_ sender: Any?) {
         if tryPasteImage() { return }
         super.paste(sender)
+        refreshEditorHeightAfterProgrammaticChange()
     }
 
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
@@ -413,7 +435,7 @@ final class SubmitTextView: NSTextView {
         if let delegate = self.delegate as? PromptEditor.Coordinator {
             delegate.parent.text = newText
         }
-        (enclosingScrollView as? PromptEditorScrollView)?.recalcIntrinsicHeight()
+        refreshEditorHeightAfterProgrammaticChange()
         needsDisplay = true
     }
 
@@ -423,8 +445,14 @@ final class SubmitTextView: NSTextView {
         if let delegate = self.delegate as? PromptEditor.Coordinator {
             delegate.parent.text = newText
         }
-        (enclosingScrollView as? PromptEditorScrollView)?.recalcIntrinsicHeight()
+        refreshEditorHeightAfterProgrammaticChange()
         needsDisplay = true
+    }
+
+    private func refreshEditorHeightAfterProgrammaticChange() {
+        guard let scrollView = enclosingScrollView as? PromptEditorScrollView else { return }
+        scrollView.recalcIntrinsicHeight()
+        scrollView.scheduleRecalcIntrinsicHeight()
     }
 
     /// Try to extract an image from the clipboard. Returns true if an image was handled.
@@ -466,7 +494,7 @@ final class SubmitTextView: NSTextView {
         if let delegate = self.delegate as? PromptEditor.Coordinator {
             delegate.parent.text = string
         }
-        (enclosingScrollView as? PromptEditorScrollView)?.recalcIntrinsicHeight()
+        refreshEditorHeightAfterProgrammaticChange()
         needsDisplay = true
     }
 }
