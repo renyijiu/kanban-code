@@ -191,7 +191,15 @@ final class PromptEditorScrollView: NSScrollView {
         guard let textView = documentView as? NSTextView,
               let layoutManager = textView.layoutManager,
               let textContainer = textView.textContainer else { return }
-        let contentWidth = max(1, contentView.bounds.width)
+
+        let measuredWidth = [
+            contentView.bounds.width,
+            bounds.width,
+            superview?.bounds.width ?? 0,
+            window?.contentView?.bounds.width ?? 0,
+        ].first { $0 > 8 } ?? 1
+        let contentWidth = max(1, measuredWidth)
+
         textContainer.containerSize = NSSize(
             width: contentWidth,
             height: CGFloat.greatestFiniteMagnitude

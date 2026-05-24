@@ -604,6 +604,7 @@ struct ChatInputBar: View {
     /// whenever the query changes or the picker opens.
     @State private var mentionSelectedIndex: Int = 0
     @State private var usesInlineImageMarkers = false
+    @State private var editorHeight: CGFloat = 36
 
     private var canSend: Bool {
         !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
@@ -689,11 +690,13 @@ struct ChatInputBar: View {
                     onEnterIntercept: { computeMentionReplacement() },
                     onTabIntercept: { computeMentionReplacement() },
                     onImagePaste: insertPastedImage,
-                    onEscape: { handleEscape() }
+                    onEscape: { handleEscape() },
+                    onHeightChange: { height in
+                        editorHeight = clampedEditorHeight(height, minHeight: 24, maxHeight: 160)
+                    }
                 )
                 .focused($isFocused)
-                .frame(minHeight: 24)
-                .fixedSize(horizontal: false, vertical: true)
+                .frame(height: clampedEditorHeight(editorHeight, minHeight: 24, maxHeight: 160), alignment: .top)
             }
             Button(action: send) {
                 Image(systemName: "arrow.up.circle.fill")
@@ -786,11 +789,13 @@ struct ChatInputBar: View {
                     onUpArrowAtStart: { recallHistoryUp() },
                     onDownArrowAtStart: { recallHistoryDown() },
                     onImagePaste: insertPastedImage,
-                    onEscape: onEscape
+                    onEscape: onEscape,
+                    onHeightChange: { height in
+                        editorHeight = clampedEditorHeight(height, minHeight: 36, maxHeight: 160)
+                    }
                 )
                 .focused($isFocused)
-                .frame(minHeight: 24)
-                .fixedSize(horizontal: false, vertical: true)
+                .frame(height: clampedEditorHeight(editorHeight, minHeight: 36, maxHeight: 160), alignment: .top)
                 // Extra bottom padding so text never overlaps the floating buttons
                 .padding(.bottom, 30)
                 } // end VStack (images + editor)
@@ -869,6 +874,10 @@ struct ChatInputBar: View {
         DispatchQueue.main.async {
             isFocused = true
         }
+    }
+
+    private func clampedEditorHeight(_ height: CGFloat, minHeight: CGFloat, maxHeight: CGFloat) -> CGFloat {
+        min(maxHeight, max(minHeight, height))
     }
 
     private func insertPastedImage(_ data: Data) -> String {
