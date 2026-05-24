@@ -5,6 +5,8 @@
  */
 
 import { spawn, type ChildProcess } from "node:child_process";
+import { accessSync, constants } from "node:fs";
+import { delimiter, join } from "node:path";
 
 export interface TunnelHandle {
   /** The public URL cloudflared allocated (e.g. "https://xxx.trycloudflare.com"). */
@@ -32,6 +34,21 @@ export interface StartTunnelOptions {
 // just in case the CDN changes the surface.
 const URL_REGEX = /https:\/\/[a-z0-9][a-z0-9-]*\.(?:trycloudflare\.com|cfargotunnel\.com)/i;
 
+function findExecutable(name: string): string | null {
+  const path = process.env.PATH ?? "";
+  for (const dir of path.split(delimiter)) {
+    if (!dir) continue;
+    const candidate = join(dir, name);
+    try {
+      accessSync(candidate, constants.X_OK);
+      return candidate;
+    } catch {
+      // Keep searching.
+    }
+  }
+  return null;
+}
+
 /** Start cloudflared and resolve once the public URL is seen on stdout/stderr.
  *
  *  Resolution order for the cloudflared binary:
@@ -48,11 +65,10 @@ const URL_REGEX = /https:\/\/[a-z0-9][a-z0-9-]*\.(?:trycloudflare\.com|cfargotun
  */
 export function startCloudflaredTunnel(opts: StartTunnelOptions): Promise<TunnelHandle> {
   const bundled = process.env.KANBAN_CLOUDFLARED;
-  const defaultCommand = bundled || "npx";
   const urlArgs = ["--config", "/dev/null", "tunnel", "--url", `http://localhost:${opts.port}`];
-  const defaultArgs = bundled
-    ? urlArgs
-    : ["-y", "cloudflared", ...urlArgs];
+  const installedCloudflared = bundled ? null : findExecutable("cloudflared");
+  const defaultCommand = bundled || installedCloudflared || "npx";
+  const defaultArgs = bundled || installedCloudflared ? urlArgs : ["-y", "cloudflared", ...urlArgs];
   const {
     port,
     command = defaultCommand,

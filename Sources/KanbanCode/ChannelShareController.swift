@@ -68,12 +68,11 @@ final class ChannelShareController {
             proc.arguments = [cliJS, "channel", "share", channel, "--duration", duration.cliArg, "--web-dist", webDist]
         }
         var env = ProcessInfo.processInfo.environment
-        // Swift apps launched from Finder have a minimal PATH; make sure npx /
-        // node / npm are reachable so `npx -y cloudflared` works the first
-        // time a share is started. We deliberately do NOT ship cloudflared:
-        // a bundled copy gets quarantined by macOS Gatekeeper (unsigned origin
-        // binary) which blocks its outbound network. npx-downloaded copies
-        // under ~/.npm/_npx/ don't carry the quarantine xattr.
+        // Swift apps launched from Finder have a minimal PATH; make sure node,
+        // npx, npm, and a Homebrew cloudflared are reachable. We deliberately
+        // do NOT ship cloudflared: a bundled copy gets quarantined by macOS
+        // Gatekeeper (unsigned origin binary), which blocks its outbound
+        // network.
         env["PATH"] = (env["PATH"] ?? "") + ":/usr/local/bin:/opt/homebrew/bin:/usr/bin"
         proc.environment = env
 
@@ -86,6 +85,7 @@ final class ChannelShareController {
 
         let stdoutHandle = stdout.fileHandleForReading
         let stderrHandle = stderr.fileHandleForReading
+        let stderrTail = ProcessOutputTail()
 
         do {
             try proc.run()
@@ -96,7 +96,7 @@ final class ChannelShareController {
         processes[channel] = proc
 
         // Log stderr for diagnostics (also drains the pipe so it doesn't block).
-        Self.drainStderr(stderrHandle, tag: "[share:\(channel)]")
+        Self.drainStderr(stderrHandle, tag: "[share:\(channel)]", tail: stderrTail)
 
         // Parse the four metadata lines.
         do {
@@ -108,9 +108,11 @@ final class ChannelShareController {
             watchExit(channel: channel, process: proc)
             return share
         } catch {
-            phases[channel] = .failed(error.localizedDescription)
+            let diagnostic = await stderrTail.snapshot()
+            let message = Self.failureMessage(error, stderr: diagnostic)
+            phases[channel] = .failed(message)
             await stop(channel: channel)
-            throw error
+            throw ShareError.handshakeFailed(message)
         }
     }
 
@@ -229,12 +231,13 @@ final class ChannelShareController {
         }
     }
 
-    private static func drainStderr(_ handle: FileHandle, tag: String) {
+    private static func drainStderr(_ handle: FileHandle, tag: String, tail: ProcessOutputTail? = nil) {
         Task.detached {
             while true {
                 let data = handle.availableData
                 if data.isEmpty { return }
                 if let s = String(data: data, encoding: .utf8) {
+                    await tail?.append(s)
                     // Keep share-related diagnostics quiet unless debugging.
                     FileHandle.standardError.write(Data("\(tag) \(s)".utf8))
                 }
@@ -264,6 +267,34 @@ final class ChannelShareController {
             return c
         }
         return nil
+    }
+
+    private static func failureMessage(_ error: Error, stderr: String) -> String {
+        let base = error.localizedDescription
+        let trimmed = stderr
+            .split(whereSeparator: \.isNewline)
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+            .suffix(4)
+            .joined(separator: " ")
+        guard !trimmed.isEmpty else { return base }
+        return "\(base): \(trimmed)"
+    }
+}
+
+private actor ProcessOutputTail {
+    private var value = ""
+    private let maxLength = 4000
+
+    func append(_ chunk: String) {
+        value += chunk
+        if value.count > maxLength {
+            value = String(value.suffix(maxLength))
+        }
+    }
+
+    func snapshot() -> String {
+        value
     }
 }
 

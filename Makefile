@@ -56,8 +56,8 @@ app: build cli install-cli web
 	@# Bundle the kanban CLI inside the app so it's always available.
 	@# cloudflared is NOT bundled — the bundled copy gets quarantined by
 	@# macOS Gatekeeper (unsigned-by-us origin binary), which then breaks
-	@# its outbound network. `npx -y cloudflared` fetches & caches it under
-	@# ~/.npm/_npx/ where it runs without the quarantine xattr.
+	@# its outbound network. The CLI uses an installed cloudflared when
+	@# available and falls back to `npx -y cloudflared`.
 	@# Ship only runtime artifacts:
 	@#  • dist/*.js (compiled TypeScript) minus *.test.js
 	@#  • package.json + lockfile so pnpm can reinstall deterministically
