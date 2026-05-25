@@ -129,6 +129,7 @@ struct BM25Tests {
         let query = SessionSearchQuery("\"https://github.com/langwatch/langwatch/pull/4189\"")
         #expect(query.requiresExactMatch)
         #expect(query.exactPhrases.contains("https://github.com/langwatch/langwatch/pull/4189"))
+        #expect(query.snippetTerms.first == "https://github.com/langwatch/langwatch/pull/4189")
         #expect(query.exactMatchCount(in: "see https://github.com/langwatch/langwatch/pull/4189") > 0)
     }
 

@@ -201,7 +201,7 @@ struct SearchOverlay: View {
     }
 
     private var queryTerms: [String] {
-        query.lowercased().components(separatedBy: .whitespaces).filter { !$0.isEmpty }
+        SessionSearchQuery(query).snippetTerms
     }
 
     private var searchFieldBar: some View {
