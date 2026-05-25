@@ -406,7 +406,12 @@ extension TerminalView {
     //
     func getAttributes (_ attribute: Attribute, withUrl: Bool) -> [NSAttributedString.Key:Any]?
     {
-        if let result = withUrl ? urlAttributes [attribute] : attributes [attribute] {
+        getAttributes(attribute, key: AttributeRenderKey(attribute), withUrl: withUrl)
+    }
+
+    func getAttributes (_ attribute: Attribute, key: AttributeRenderKey, withUrl: Bool) -> [NSAttributedString.Key:Any]?
+    {
+        if let result = withUrl ? urlAttributes [key] : attributes [key] {
             return result
         }
 
@@ -476,10 +481,10 @@ extension TerminalView {
             nsattr [SwiftTermUnderlineStyleKey] = Int(UnderlineStyle.dashed.rawValue)
             
             // Add to cache
-            urlAttributes [attribute] = nsattr
+            urlAttributes [key] = nsattr
         } else {
             // Just add to cache
-            attributes [attribute] = nsattr
+            attributes [key] = nsattr
         }
         return nsattr
     }
@@ -589,9 +594,10 @@ extension TerminalView {
         // Batching state: accumulate consecutive characters with the same attributes
         var pendingText = ""
         var pendingAttrs: [NSAttributedString.Key: Any]? = nil
-        var lastAttr: Attribute? = nil
+        var lastAttrKey: AttributeRenderKey? = nil
         var lastHasUrl = false
         var lastIsSelected = false
+        var lastResolvedAttributes: [NSAttributedString.Key: Any]? = nil
 
         func flushPending() {
             if !pendingText.isEmpty, let attrs = pendingAttrs {
@@ -604,18 +610,9 @@ extension TerminalView {
             let ch: CharData = line[col]
             let width = max(1, Int(ch.width))
             let attr = ch.attribute
+            let attrKey = AttributeRenderKey(attr)
             let hasUrl = shouldUnderlineLink(row: row, column: col, width: width, cell: ch)
-            guard let attributes = getAttributes(attr, withUrl: hasUrl) else {
-                flushPending()
-                if let finished = builder?.buildIfNeeded() {
-                    segments.append(finished)
-                }
-                builder = nil
-                previousPlaceholder = nil
-                previousPlaceholderAttribute = nil
-                col += width
-                continue
-            }
+            let isSelected = isColumnSelected(selectionColumns, column: col, width: width)
 
             if builder == nil || builder!.columnWidth != width {
                 flushPending()
@@ -625,23 +622,36 @@ extension TerminalView {
                 builder = ViewLineSegmentBuilder(column: col, columnWidth: width)
             }
 
-            let isSelected = isColumnSelected(selectionColumns, column: col, width: width)
-
-            // Flush batch when attributes change
-            if attr != lastAttr || hasUrl != lastHasUrl || isSelected != lastIsSelected {
+            let attributesChanged = attrKey != lastAttrKey || hasUrl != lastHasUrl || isSelected != lastIsSelected
+            let currentAttributes: [NSAttributedString.Key: Any]
+            if attributesChanged || lastResolvedAttributes == nil {
                 flushPending()
-                lastAttr = attr
+                guard let attributes = getAttributes(attr, key: attrKey, withUrl: hasUrl) else {
+                    if let finished = builder?.buildIfNeeded() {
+                        segments.append(finished)
+                    }
+                    builder = nil
+                    previousPlaceholder = nil
+                    previousPlaceholderAttribute = nil
+                    lastAttrKey = nil
+                    lastResolvedAttributes = nil
+                    col += width
+                    continue
+                }
+
+                if isSelected {
+                    var mutable = attributes
+                    mutable[.selectionBackgroundColor] = selectedTextBackgroundColor
+                    currentAttributes = mutable
+                } else {
+                    currentAttributes = attributes
+                }
+                lastAttrKey = attrKey
                 lastHasUrl = hasUrl
                 lastIsSelected = isSelected
-            }
-
-            let currentAttributes: [NSAttributedString.Key: Any]
-            if isSelected {
-                var mutable = attributes
-                mutable[.selectionBackgroundColor] = selectedTextBackgroundColor
-                currentAttributes = mutable
+                lastResolvedAttributes = currentAttributes
             } else {
-                currentAttributes = attributes
+                currentAttributes = lastResolvedAttributes!
             }
             pendingAttrs = currentAttributes
 

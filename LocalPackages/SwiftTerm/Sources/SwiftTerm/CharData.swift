@@ -59,6 +59,42 @@ public enum UnderlineStyle: UInt8 {
     case dashed = 5
 }
 
+enum AttributeRenderColorKey: Hashable {
+    case ansi256(UInt8)
+    case trueColor(UInt8, UInt8, UInt8)
+    case defaultColor
+    case defaultInvertedColor
+
+    init(_ color: Attribute.Color) {
+        switch color {
+        case .ansi256(let code):
+            self = .ansi256(code)
+        case .trueColor(let red, let green, let blue):
+            self = .trueColor(red, green, blue)
+        case .defaultColor:
+            self = .defaultColor
+        case .defaultInvertedColor:
+            self = .defaultInvertedColor
+        }
+    }
+}
+
+struct AttributeRenderKey: Hashable {
+    let fg: AttributeRenderColorKey
+    let bg: AttributeRenderColorKey
+    let style: UInt8
+    let underlineStyle: UInt8
+    let underlineColor: AttributeRenderColorKey?
+
+    init(_ attribute: Attribute) {
+        fg = AttributeRenderColorKey(attribute.fg)
+        bg = AttributeRenderColorKey(attribute.bg)
+        style = attribute.style.rawValue
+        underlineStyle = attribute.underlineStyle.rawValue
+        underlineColor = attribute.underlineColor.map(AttributeRenderColorKey.init)
+    }
+}
+
 ///
 /// Attribute contains the foreground and background color information for the invidual
 /// cells, as well as the character style of the cell (bold, underline, inverse) that the character
