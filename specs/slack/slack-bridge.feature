@@ -17,11 +17,19 @@ Feature: Bidirectional Slack bridge for agent observability and steering
     And consecutive assistant lines (thinking + reply) are merged into one logical message
     And tool results are summarized rather than dumped in full
 
-  Scenario: Every injected prompt is mirrored and marked, human relays are not
-    When any prompt is injected into the agent (a scheduled nudge, a self-compact, an auto-sent queued prompt, or a manual kanban send on the box)
-    Then it is posted to the channel under the header ">>> Received user message" with the body in italics
+  Scenario: A prompt is mirrored only once the agent actually receives it
+    When a prompt is injected into the agent (a scheduled nudge, a self-compact, an auto-sent queued prompt, or a manual kanban send on the box)
+    Then it is NOT posted to the channel merely because the keystrokes were pasted into the tmux pane
+    And it is posted only when the agent's UserPromptSubmit hook confirms the prompt was actually received
+    And it is posted under the header ">>> Received user message" with the body in italics, using the exact text the agent received
+    And so a paste that never becomes a submitted prompt (e.g. the session was mid-restart) is never falsely announced as received
+
+  Scenario: Human relays from Slack are not echoed back
     When a human's Slack message is relayed into the agent
-    Then it is NOT re-posted by the bridge (it already appears as that person's Slack message)
+    Then the bridge records a skip-announce marker for that agent's session before pasting it
+    And when the relayed prompt's UserPromptSubmit arrives, the daemon consumes the marker and does NOT re-post it (it already appears as that person's Slack message)
+    And the marker is consumed by exactly one received prompt, so several rapid relays each suppress their own echo
+    And the marker expires after a TTL, so a relay that never gets submitted cannot accidentally suppress a later automated prompt
     And so the marker only ever appears on injected prompts, letting a reader tell the agent's input apart from its own replies
 
   Scenario: A team member steers the agent from Slack

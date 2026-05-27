@@ -4,6 +4,7 @@ import { hookEventsPath } from "../paths.js";
 import { readLinks, readSessionContext, pasteTmuxPrompt } from "../data.js";
 import { upsertCard, isoNow } from "../cards.js";
 import { installHooks } from "../hooks.js";
+import { announceSuppressPath, ANNOUNCE_SUPPRESS_TTL_MS } from "../slack/announce-suppress.js";
 import { Link, QueuedPrompt, SessionContext } from "../types.js";
 
 export type SelfCompactAction = "queuePrompt" | "compactNow";
@@ -27,6 +28,9 @@ export interface HookEvent {
   event: string;
   timestampMs: number;
   transcriptPath?: string;
+  /// The submitted prompt text, present on UserPromptSubmit events (decoded
+  /// from the hook's base64 payload). Used to mirror the exact received text.
+  prompt?: string;
 }
 
 export interface DaemonOptions {
@@ -37,8 +41,9 @@ export interface DaemonOptions {
   selfCompact?: { enabled: boolean; rules?: SelfCompactRule[] };
   /// Side effect for sending text to a tmux session. Injectable for tests.
   paste?: (sessionName: string, text: string) => void;
-  /// Optional: mirror automated traffic (auto-sent prompts, /compact) to Slack.
-  /// Fire-and-forget; not used in tests.
+  /// Optional: mirror a confirmed-received prompt to the agent's Slack channel.
+  /// Called on UserPromptSubmit (real receipt), never on mere paste, and never
+  /// for relayed Slack-human messages. Fire-and-forget; not used in tests.
   announce?: (slug: string, text: string) => void;
 }
 
@@ -67,6 +72,10 @@ export class Daemon {
   private lastTriggered = new Map<string, number>();
   /// Byte offset into hook-events.jsonl already consumed.
   private offset = 0;
+  /// Byte offset into announce-suppress.jsonl already consumed.
+  private suppressOffset = 0;
+  /// Per-session queue of unconsumed skip-announce marker timestamps (ms).
+  private suppressMarkers = new Map<string, number[]>();
 
   private pollTimer?: NodeJS.Timeout;
   private eventTimer?: NodeJS.Timeout;
@@ -87,6 +96,7 @@ export class Daemon {
   start(): void {
     installHooks();
     this.offset = existsSync(hookEventsPath()) ? statSync(hookEventsPath()).size : 0;
+    this.suppressOffset = existsSync(announceSuppressPath()) ? statSync(announceSuppressPath()).size : 0;
     this.eventTimer = setInterval(() => this.processEvents(), 500);
     this.pollTimer = setInterval(() => this.evaluateAutoCompact(), this.pollIntervalMs);
   }
@@ -122,11 +132,21 @@ export class Daemon {
       try {
         const o = JSON.parse(line);
         if (o.sessionId && o.event) {
+          let prompt: string | undefined;
+          if (o.payloadB64) {
+            try {
+              const payload = JSON.parse(Buffer.from(o.payloadB64, "base64").toString("utf-8"));
+              if (typeof payload?.prompt === "string") prompt = payload.prompt;
+            } catch {
+              /* malformed payload: fall back to no prompt */
+            }
+          }
           events.push({
             sessionId: o.sessionId,
             event: o.event,
             timestampMs: o.timestamp ? Date.parse(o.timestamp) : Date.now(),
             transcriptPath: o.transcriptPath,
+            prompt,
           });
         }
       } catch {
@@ -144,6 +164,7 @@ export class Daemon {
     for (const e of events) {
       if (e.event === "UserPromptSubmit") {
         this.lastPromptAt.set(e.sessionId, Math.max(this.lastPromptAt.get(e.sessionId) ?? 0, e.timestampMs));
+        this.announceReceived(e);
       } else if (e.event === "Stop") {
         stops.push(e);
         const stopMs = e.timestampMs;
@@ -151,6 +172,68 @@ export class Daemon {
       }
     }
     return stops;
+  }
+
+  /// Mirror a confirmed-received prompt to the agent's Slack channel. Fires on
+  /// UserPromptSubmit (real receipt), so a paste that never becomes a submitted
+  /// prompt is never announced. A relayed Slack-human message is skipped by
+  /// consuming the bridge's skip-announce marker so it is not echoed back.
+  announceReceived(e: HookEvent): void {
+    if (!e.prompt) return;
+    if (this.consumeSuppress(e.sessionId)) return; // bridge relay: already in Slack
+    const card = readLinks().find((c) => c.sessionLink?.sessionId === e.sessionId);
+    const slug = card?.name;
+    if (slug) this.announce(slug, e.prompt);
+  }
+
+  /// Tail the bridge's skip-announce markers appended since the last read into
+  /// the per-session queue, then drop any older than the TTL.
+  private ingestSuppressMarkers(now = Date.now()): void {
+    const path = announceSuppressPath();
+    if (existsSync(path)) {
+      const size = statSync(path).size;
+      if (size < this.suppressOffset) this.suppressOffset = 0; // truncated/rotated
+      if (size > this.suppressOffset) {
+        const fd = openSync(path, "r");
+        const buf = Buffer.alloc(size - this.suppressOffset);
+        readSync(fd, buf, 0, buf.length, this.suppressOffset);
+        closeSync(fd);
+        const text = buf.toString("utf-8");
+        const lastNl = text.lastIndexOf("\n");
+        if (lastNl >= 0) {
+          this.suppressOffset += Buffer.byteLength(text.slice(0, lastNl + 1), "utf-8");
+          for (const line of text.slice(0, lastNl).split("\n")) {
+            if (!line.trim()) continue;
+            try {
+              const o = JSON.parse(line);
+              if (o.sessionId && typeof o.ts === "number") {
+                const list = this.suppressMarkers.get(o.sessionId) ?? [];
+                list.push(o.ts);
+                this.suppressMarkers.set(o.sessionId, list);
+              }
+            } catch {
+              /* skip malformed */
+            }
+          }
+        }
+      }
+    }
+    for (const [sid, list] of this.suppressMarkers) {
+      const fresh = list.filter((ts) => now - ts <= ANNOUNCE_SUPPRESS_TTL_MS);
+      if (fresh.length) this.suppressMarkers.set(sid, fresh);
+      else this.suppressMarkers.delete(sid);
+    }
+  }
+
+  /// If a non-expired skip-announce marker exists for this session, consume the
+  /// oldest one and return true (so the caller skips that announce).
+  consumeSuppress(sessionId: string, now = Date.now()): boolean {
+    this.ingestSuppressMarkers(now);
+    const list = this.suppressMarkers.get(sessionId);
+    if (!list || list.length === 0) return false;
+    list.shift(); // one marker suppresses exactly one received prompt
+    if (list.length === 0) this.suppressMarkers.delete(sessionId);
+    return true;
   }
 
   /// Auto-send the first auto-sendable queued prompt for a session, unless a
@@ -176,8 +259,8 @@ export class Daemon {
     this.dequeue(card.id, first.id);
     // Treat our own auto-send as a prompt so the next Stop sends the next one.
     this.lastPromptAt.set(sessionId, Date.now());
-    // Mirror automated prompts (e.g. self-compact warnings) to Slack.
-    this.announce(card.name ?? "", first.body);
+    // The mirror to Slack happens on this prompt's own UserPromptSubmit (real
+    // receipt), via announceReceived, not here at paste time.
     return { sent: true };
   }
 

@@ -35,9 +35,17 @@ if [ -z "$session_id" ]; then
 fi
 [ -z "$session_id" ] && exit 0
 
+# For UserPromptSubmit, capture the whole payload (base64, so the prompt's
+# quotes/newlines survive) so the daemon can mirror the exact text the agent
+# received once receipt is confirmed.
+payload_b64=""
+if [ "$hook_event" = "UserPromptSubmit" ]; then
+    payload_b64=$(printf '%s' "$input" | base64 | tr -d '\\n')
+fi
+
 timestamp=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
-printf '{"sessionId":"%s","event":"%s","timestamp":"%s","transcriptPath":"%s"}\\n' \\
-    "$session_id" "$hook_event" "$timestamp" "$transcript" >> "$EVENTS_FILE"
+printf '{"sessionId":"%s","event":"%s","timestamp":"%s","transcriptPath":"%s","payloadB64":"%s"}\\n' \\
+    "$session_id" "$hook_event" "$timestamp" "$transcript" "$payload_b64" >> "$EVENTS_FILE"
 `;
 
 /// Captures Claude Code's context/token usage per session into

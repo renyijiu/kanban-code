@@ -292,7 +292,7 @@ program
   .argument("<card>", "Card ID, ID prefix, or name search")
   .argument("<message>", "Message to send")
   .option("--keys", "Use send-keys instead of paste-buffer (for short single-line)")
-  .option("--announce", "(deprecated: kanban send always mirrors the message to the agent's Slack channel now)")
+  .option("--announce", "(deprecated, no-op: prompts are mirrored to Slack on confirmed receipt by the daemon)")
   .option("-j, --json", "Output as JSON")
   .action(async (cardQuery: string, message: string, opts) => {
     const links = readLinks();
@@ -310,12 +310,10 @@ program
       ? sendTmuxKeys(card.tmuxLink.sessionName, message)
       : pasteTmuxPrompt(card.tmuxLink.sessionName, message);
 
-    // Always mirror the injected prompt to Slack. Messages relayed *from* a
-    // Slack human never reach this command (the bridge pastes them directly),
-    // so they are correctly never re-posted.
-    if (result.ok) {
-      await announceToSlack(card.name ?? cardQuery, message);
-    }
+    // No announce here: the prompt is mirrored to Slack only once the agent's
+    // UserPromptSubmit hook confirms it was actually received (the daemon does
+    // it), so a paste that never becomes a submitted prompt is never falsely
+    // announced as received.
 
     if (opts.json) {
       output(

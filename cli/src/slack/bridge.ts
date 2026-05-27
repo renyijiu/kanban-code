@@ -5,6 +5,7 @@ import { routeSlackMessage, ChannelMapping } from "./inbound.js";
 import { formatTranscriptLines } from "./format.js";
 import { loadAgentsConfig } from "../agents/config.js";
 import { agentIdentity } from "../agents/identity.js";
+import { recordAnnounceSuppress } from "./announce-suppress.js";
 import { findSessionJsonl, pasteTmuxPrompt } from "../data.js";
 
 export interface BridgeOptions {
@@ -103,6 +104,10 @@ export async function runSlackBridge(opts: BridgeOptions): Promise<void> {
     if (ack) await ack();
     const decision = routeSlackMessage(event, mapping, botUserId);
     if (decision.action === "deliver") {
+      // Mark this relay so the daemon does not echo it back to the channel
+      // (it already appears there as that person's Slack message). Recorded
+      // before the paste so the marker is in place before UserPromptSubmit.
+      recordAnnounceSuppress(agentIdentity(decision.slug).sessionId);
       pasteTmuxPrompt(decision.slug, decision.text); // tmux session name == slug
     }
   });
