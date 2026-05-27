@@ -11,33 +11,72 @@ final class ActionsMenuProvider {
 /// Unified context menu content for all card action menus (kanban cards,
 /// list sidebar, drawer toolbar). Ensures every entry point shows the same
 /// actions with the same state.
+struct CardActionsMenuActions {
+    let onStart: () -> Void
+    let onResume: () -> Void
+    let onFork: (_ keepWorktree: Bool) -> Void
+    let onRenameRequest: () -> Void
+    let onCopyResumeCmd: () -> Void
+    let onCopyConversationMarkdown: () -> Void
+    let onCheckpoint: (() -> Void)?
+    let onAddLink: (() -> Void)?
+    let onUnlink: ((Action.LinkType) -> Void)?
+    let onDiscover: (() -> Void)?
+    let onCleanupWorktree: (() -> Void)?
+    let canCleanupWorktree: Bool
+    let onArchive: (() -> Void)?
+    let onDelete: () -> Void
+    let onMoveToProject: (String) -> Void
+    let onMoveToFolder: () -> Void
+    let onMigrateAssistant: (CodingAssistant) -> Void
+
+    init(
+        onStart: @escaping () -> Void,
+        onResume: @escaping () -> Void,
+        onFork: @escaping (_ keepWorktree: Bool) -> Void,
+        onRenameRequest: @escaping () -> Void,
+        onCopyResumeCmd: @escaping () -> Void,
+        onCopyConversationMarkdown: @escaping () -> Void,
+        onCheckpoint: (() -> Void)?,
+        onAddLink: (() -> Void)?,
+        onUnlink: ((Action.LinkType) -> Void)?,
+        onDiscover: (() -> Void)?,
+        onCleanupWorktree: (() -> Void)?,
+        canCleanupWorktree: Bool,
+        onArchive: (() -> Void)?,
+        onDelete: @escaping () -> Void,
+        onMoveToProject: @escaping (String) -> Void,
+        onMoveToFolder: @escaping () -> Void,
+        onMigrateAssistant: @escaping (CodingAssistant) -> Void
+    ) {
+        self.onStart = onStart
+        self.onResume = onResume
+        self.onFork = onFork
+        self.onRenameRequest = onRenameRequest
+        self.onCopyResumeCmd = onCopyResumeCmd
+        self.onCopyConversationMarkdown = onCopyConversationMarkdown
+        self.onCheckpoint = onCheckpoint
+        self.onAddLink = onAddLink
+        self.onUnlink = onUnlink
+        self.onDiscover = onDiscover
+        self.onCleanupWorktree = onCleanupWorktree
+        self.canCleanupWorktree = canCleanupWorktree
+        self.onArchive = onArchive
+        self.onDelete = onDelete
+        self.onMoveToProject = onMoveToProject
+        self.onMoveToFolder = onMoveToFolder
+        self.onMigrateAssistant = onMigrateAssistant
+    }
+}
+
 struct CardActionsMenu: View {
     let card: KanbanCodeCard
+    let actions: CardActionsMenuActions
     var showBranchInfo = false
     var githubBaseURL: String?
 
-    // Actions
-    var onStart: () -> Void = {}
-    var onResume: () -> Void = {}
-    var onFork: (_ keepWorktree: Bool) -> Void = { _ in }
-    var onRenameRequest: () -> Void = {}
-    var onCopyResumeCmd: () -> Void = {}
-    var onCopyConversationMarkdown: (() -> Void)?
-    var onCheckpoint: (() -> Void)?
-    /// Opens the Add Link popover. When nil, posts a notification instead
-    /// (used by kanban/list menus where the sheet lives on ContentView).
-    var onAddLink: (() -> Void)?
-    var onUnlink: ((Action.LinkType) -> Void)?
-    var onDiscover: (() -> Void)?
-    var onCleanupWorktree: (() -> Void)?
-    var canCleanupWorktree: Bool = true
-    var onArchive: (() -> Void)?
-    var onDelete: () -> Void = {}
     var availableProjects: [(name: String, path: String)] = []
-    var onMoveToProject: (String) -> Void = { _ in }
-    var onMoveToFolder: () -> Void = {}
     var enabledAssistants: [CodingAssistant] = []
-    var onMigrateAssistant: (CodingAssistant) -> Void = { _ in }
 
     var body: some View {
         // Branch / PR / Issue info (expanded detail only)
@@ -57,7 +96,7 @@ struct CardActionsMenu: View {
         linksSection
 
         // Discover Branches & PRs (also re-fetches PRs for the discovered branches)
-        if let onDiscover, card.link.sessionLink != nil || card.link.worktreeLink != nil {
+        if let onDiscover = actions.onDiscover, card.link.sessionLink != nil || card.link.worktreeLink != nil {
             Divider()
             Button(action: onDiscover) {
                 Label("Discover Branches & PRs", systemImage: "arrow.triangle.pull")
@@ -65,7 +104,7 @@ struct CardActionsMenu: View {
         }
 
         // Cleanup Worktree
-        if let onCleanupWorktree, card.link.worktreeLink != nil, canCleanupWorktree {
+        if let onCleanupWorktree = actions.onCleanupWorktree, card.link.worktreeLink != nil, actions.canCleanupWorktree {
             Divider()
             Button(role: .destructive, action: onCleanupWorktree) {
                 Label("Cleanup Worktree", systemImage: "trash")
@@ -79,16 +118,16 @@ struct CardActionsMenu: View {
         Divider()
         if card.link.manuallyArchived {
             if card.link.source != .githubIssue {
-                Button(role: .destructive, action: onDelete) {
+                Button(role: .destructive, action: actions.onDelete) {
                     Label("Delete Card", systemImage: "trash")
                 }
             }
-        } else if let onArchive {
+        } else if let onArchive = actions.onArchive {
             Button(action: onArchive) {
                 Label("Archive", systemImage: "archivebox")
             }
         } else {
-            Button(role: .destructive, action: onDelete) {
+            Button(role: .destructive, action: actions.onDelete) {
                 Label("Delete Card", systemImage: "trash")
             }
         }
@@ -99,7 +138,7 @@ struct CardActionsMenu: View {
         if let branch = card.link.worktreeLink?.branch ?? card.link.discoveredBranches?.first, !branch.isEmpty {
             Menu {
                 Button("Copy Branch Name") { copyToClipboard(branch) }
-                if card.link.worktreeLink != nil, let onUnlink {
+                if card.link.worktreeLink != nil, let onUnlink = actions.onUnlink {
                     Button("Unlink Branch") { onUnlink(.worktree) }
                 }
             } label: {
@@ -116,7 +155,7 @@ struct CardActionsMenu: View {
                 if let url = pr.url {
                     Button("Copy PR Link") { copyToClipboard(url) }
                 }
-                if let onUnlink {
+                if let onUnlink = actions.onUnlink {
                     Button("Unlink PR") { onUnlink(.pr(number: pr.number)) }
                 }
             } label: {
@@ -132,7 +171,7 @@ struct CardActionsMenu: View {
                 if let issueURL = issue.url ?? githubBaseURL.map({ GitRemoteResolver.issueURL(base: $0, number: issue.number) }) {
                     Button("Copy Issue Link") { copyToClipboard(issueURL) }
                 }
-                if let onUnlink {
+                if let onUnlink = actions.onUnlink {
                     Button("Unlink Issue") { onUnlink(.issue) }
                 }
             } label: {
@@ -145,25 +184,25 @@ struct CardActionsMenu: View {
     @ViewBuilder
     private var primaryActions: some View {
         if card.column == .backlog {
-            Button(action: onStart) {
+            Button(action: actions.onStart) {
                 Label("Start", systemImage: "play.fill")
             }
         }
         if card.column != .backlog {
-            Button(action: onResume) {
+            Button(action: actions.onResume) {
                 Label("Resume Session", systemImage: "play.fill")
             }
         }
-        Button(action: { onFork(true) }) {
+        Button(action: { actions.onFork(true) }) {
             Label("Fork Session", systemImage: "arrow.branch")
         }
         .disabled(card.link.sessionLink?.sessionPath == nil)
 
-        Button(action: onRenameRequest) {
+        Button(action: actions.onRenameRequest) {
             Label("Rename", systemImage: "pencil")
         }
 
-        if let onCheckpoint {
+        if let onCheckpoint = actions.onCheckpoint {
             Button(action: onCheckpoint) {
                 Label("Checkpoint / Restore", systemImage: "clock.arrow.circlepath")
             }
@@ -173,15 +212,13 @@ struct CardActionsMenu: View {
 
     @ViewBuilder
     private var copySection: some View {
-        Button(action: onCopyResumeCmd) {
+        Button(action: actions.onCopyResumeCmd) {
             Label("Copy Resume Command", systemImage: "doc.on.doc")
         }
-        if let onCopyConversationMarkdown {
-            Button(action: onCopyConversationMarkdown) {
-                Label("Copy Whole Conversation as Markdown", systemImage: "text.page")
-            }
-            .disabled(card.link.sessionLink?.sessionPath == nil && card.session?.jsonlPath == nil)
+        Button(action: actions.onCopyConversationMarkdown) {
+            Label("Copy Whole Conversation as Markdown", systemImage: "text.page")
         }
+        .disabled(card.link.sessionLink?.sessionPath == nil && card.session?.jsonlPath == nil)
         Button { copyToClipboard(card.id) } label: {
             Label("Copy Card ID", systemImage: "number")
         }
@@ -233,7 +270,7 @@ struct CardActionsMenu: View {
                 }
             }
             Button {
-                if let onAddLink {
+                if let onAddLink = actions.onAddLink {
                     onAddLink()
                 } else {
                     NotificationCenter.default.post(
@@ -256,12 +293,12 @@ struct CardActionsMenu: View {
             Divider()
             Menu {
                 ForEach(otherProjects, id: \.path) { project in
-                    Button(project.name) { onMoveToProject(project.path) }
+                    Button(project.name) { actions.onMoveToProject(project.path) }
                 }
                 if !otherProjects.isEmpty { Divider() }
-                Button("Select Folder...") { onMoveToFolder() }
+                Button("Select Folder...") { actions.onMoveToFolder() }
             } label: {
-                Label("Move to Project", systemImage: "folder.badge.arrow.forward")
+                Label("Move to Project", systemImage: "folder")
             }
         }
         if card.link.sessionLink != nil {
@@ -270,7 +307,7 @@ struct CardActionsMenu: View {
                 Divider()
                 Menu {
                     ForEach(migrationTargets, id: \.rawValue) { target in
-                        Button(target.displayName) { onMigrateAssistant(target) }
+                        Button(target.displayName) { actions.onMigrateAssistant(target) }
                     }
                 } label: {
                     Label("Migrate to Assistant", systemImage: "arrow.triangle.swap")

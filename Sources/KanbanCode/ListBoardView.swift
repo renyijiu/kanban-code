@@ -15,6 +15,7 @@ struct ListBoardView: View {
     var onResumeCard: (String) -> Void = { _ in }
     var onForkCard: (String, Bool) -> Void = { _, _ in }
     var onCopyResumeCmd: (String) -> Void = { _ in }
+    var onCopyConversationMarkdown: (String) -> Void = { _ in }
     var onDiscoverCard: (String) -> Void = { _ in }
     var onCleanupWorktree: (String) -> Void = { _ in }
     var canCleanupWorktree: (String) -> Bool = { _ in true }
@@ -124,6 +125,7 @@ struct ListBoardView: View {
             onResumeCard: onResumeCard,
             onForkCard: onForkCard,
             onCopyResumeCmd: onCopyResumeCmd,
+            onCopyConversationMarkdown: onCopyConversationMarkdown,
             onDiscoverCard: onDiscoverCard,
             onCleanupWorktree: onCleanupWorktree,
             canCleanupWorktree: canCleanupWorktree,
@@ -231,6 +233,7 @@ private struct ListBoardSectionView: View {
     let onResumeCard: (String) -> Void
     let onForkCard: (String, Bool) -> Void
     let onCopyResumeCmd: (String) -> Void
+    let onCopyConversationMarkdown: (String) -> Void
     let onDiscoverCard: (String) -> Void
     let onCleanupWorktree: (String) -> Void
     let canCleanupWorktree: (String) -> Bool
@@ -350,6 +353,7 @@ private struct ListBoardSectionView: View {
                     ListCardRowView(
                         card: card,
                         isSelected: card.id == selectedCardId,
+                        onCopyConversationMarkdown: { onCopyConversationMarkdown(card.id) },
                         onSelect: { onSelectCard(card.id) },
                         onStart: { onStartCard(card.id) },
                         onResume: { onResumeCard(card.id) },
@@ -612,6 +616,7 @@ private struct ListSectionDropDelegate: DropDelegate {
 private struct ListCardRowView: View {
     let card: KanbanCodeCard
     let isSelected: Bool
+    let onCopyConversationMarkdown: () -> Void
     var onSelect: () -> Void = {}
     var onStart: () -> Void = {}
     var onResume: () -> Void = {}
@@ -696,21 +701,27 @@ private struct ListCardRowView: View {
         .contextMenu {
             CardActionsMenu(
                 card: card,
-                onStart: onStart,
-                onResume: onResume,
-                onFork: onFork,
-                onRenameRequest: onRenameRequest,
-                onCopyResumeCmd: onCopyResumeCmd,
-                onDiscover: onDiscover,
-                onCleanupWorktree: onCleanupWorktree,
-                canCleanupWorktree: canCleanupWorktree,
-                onArchive: onArchive,
-                onDelete: onDelete,
+                actions: CardActionsMenuActions(
+                    onStart: onStart,
+                    onResume: onResume,
+                    onFork: onFork,
+                    onRenameRequest: onRenameRequest,
+                    onCopyResumeCmd: onCopyResumeCmd,
+                    onCopyConversationMarkdown: onCopyConversationMarkdown,
+                    onCheckpoint: nil,
+                    onAddLink: nil,
+                    onUnlink: nil,
+                    onDiscover: onDiscover,
+                    onCleanupWorktree: onCleanupWorktree,
+                    canCleanupWorktree: canCleanupWorktree,
+                    onArchive: onArchive,
+                    onDelete: onDelete,
+                    onMoveToProject: onMoveToProject,
+                    onMoveToFolder: onMoveToFolder,
+                    onMigrateAssistant: onMigrateAssistant
+                ),
                 availableProjects: availableProjects,
-                onMoveToProject: onMoveToProject,
-                onMoveToFolder: onMoveToFolder,
-                enabledAssistants: enabledAssistants,
-                onMigrateAssistant: onMigrateAssistant
+                enabledAssistants: enabledAssistants
             )
         }
     }

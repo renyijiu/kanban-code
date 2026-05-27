@@ -370,6 +370,7 @@ struct ContentView: View {
                 NSPasteboard.general.clearContents()
                 NSPasteboard.general.setString(cmd, forType: .string)
             },
+            onCopyConversationMarkdown: { cardId in copyConversationMarkdown(cardId: cardId) },
             onDiscoverCard: { cardId in
                 Task {
                     store.dispatch(.setBusy(cardId: cardId, busy: true))
@@ -452,6 +453,7 @@ struct ContentView: View {
                 NSPasteboard.general.clearContents()
                 NSPasteboard.general.setString(cmd, forType: .string)
             },
+            onCopyConversationMarkdown: { cardId in copyConversationMarkdown(cardId: cardId) },
             onDiscoverCard: { cardId in
                 Task {
                     store.dispatch(.setBusy(cardId: cardId, busy: true))
@@ -660,6 +662,47 @@ struct ContentView: View {
             ),
             isDroppingImage: $isDroppingImage
         )
+    }
+
+    private func copyConversationMarkdown(cardId: String) {
+        guard let card = store.state.cards.first(where: { $0.id == cardId }) else { return }
+        guard let sessionPath = card.link.sessionLink?.sessionPath ?? card.session?.jsonlPath else {
+            store.dispatch(.setError("No conversation transcript found"))
+            return
+        }
+
+        let title = card.displayTitle
+        let assistant = card.link.effectiveAssistant
+        let sessionId = card.link.sessionLink?.sessionId ?? card.session?.id
+        let sessionStore = assistantRegistry.store(for: assistant) ?? store.sessionStore
+        let exportStart = RenderDiagnostics.mark()
+
+        Task {
+            do {
+                let markdown = try await Task.detached(priority: .utility) {
+                    try await ConversationMarkdownExporter.exportMarkdown(
+                        title: title,
+                        assistant: assistant,
+                        sessionId: sessionId,
+                        sessionPath: sessionPath,
+                        sessionStore: sessionStore
+                    )
+                }.value
+
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(markdown, forType: .string)
+                store.dispatch(.setError("Conversation markdown copied to clipboard"))
+                RenderDiagnostics.logIfSlow(
+                    "ContentView.copyConversationMarkdown",
+                    since: exportStart,
+                    thresholdMs: 100,
+                    metadata: "card=\(cardId.prefix(12)) assistant=\(assistant.rawValue) path=\((sessionPath as NSString).lastPathComponent)"
+                )
+            } catch {
+                KanbanCodeLog.error("conversation-export", "Failed to export markdown for card \(cardId.prefix(12)): \(error)")
+                store.dispatch(.setError("Failed to copy conversation markdown: \(error.localizedDescription)"))
+            }
+        }
     }
 
     @ViewBuilder
@@ -2132,47 +2175,51 @@ struct ContentView: View {
         Menu {
             CardActionsMenu(
                 card: card,
-                showBranchInfo: true,
-                onStart: { startCard(cardId: card.id) },
-                onResume: { resumeCard(cardId: card.id) },
-                onFork: { keepWorktree in forkCard(cardId: card.id, keepWorktree: keepWorktree) },
-                onRenameRequest: { renamingCardId = card.id },
-                onCopyResumeCmd: {
-                    var cmd = ""
-                    if let pp = card.link.projectPath { cmd += "cd \(pp) && " }
-                    if let sid = card.link.sessionLink?.sessionId {
-                        cmd += card.link.effectiveAssistant.resumeCommand(sessionId: sid, skipPermissions: false)
-                    }
-                    NSPasteboard.general.clearContents()
-                    NSPasteboard.general.setString(cmd, forType: .string)
-                },
-                onCheckpoint: {
-                    detailTab = .history
-                    // CardDetailView picks up checkpointMode from its own menu
-                    // but from here we just navigate to history tab
-                },
-                onAddLink: { showAddLinkCardId = card.id },
-                onUnlink: { linkType in store.dispatch(.unlinkFromCard(cardId: card.id, linkType: linkType)) },
-                onDiscover: {
-                    Task {
-                        store.dispatch(.setBusy(cardId: card.id, busy: true))
-                        if let updatedLink = await orchestrator.discoverBranchesForCard(cardId: card.id) {
-                            store.dispatch(.createManualTask(updatedLink))
+                actions: CardActionsMenuActions(
+                    onStart: { startCard(cardId: card.id) },
+                    onResume: { resumeCard(cardId: card.id) },
+                    onFork: { keepWorktree in forkCard(cardId: card.id, keepWorktree: keepWorktree) },
+                    onRenameRequest: { renamingCardId = card.id },
+                    onCopyResumeCmd: {
+                        var cmd = ""
+                        if let pp = card.link.projectPath { cmd += "cd \(pp) && " }
+                        if let sid = card.link.sessionLink?.sessionId {
+                            cmd += card.link.effectiveAssistant.resumeCommand(sessionId: sid, skipPermissions: false)
                         }
-                        await store.reconcile()
-                        store.dispatch(.setBusy(cardId: card.id, busy: false))
+                        NSPasteboard.general.clearContents()
+                        NSPasteboard.general.setString(cmd, forType: .string)
+                    },
+                    onCopyConversationMarkdown: { copyConversationMarkdown(cardId: card.id) },
+                    onCheckpoint: {
+                        detailTab = .history
+                        // CardDetailView picks up checkpointMode from its own menu
+                        // but from here we just navigate to history tab
+                    },
+                    onAddLink: { showAddLinkCardId = card.id },
+                    onUnlink: { linkType in store.dispatch(.unlinkFromCard(cardId: card.id, linkType: linkType)) },
+                    onDiscover: {
+                        Task {
+                            store.dispatch(.setBusy(cardId: card.id, busy: true))
+                            if let updatedLink = await orchestrator.discoverBranchesForCard(cardId: card.id) {
+                                store.dispatch(.createManualTask(updatedLink))
+                            }
+                            await store.reconcile()
+                            store.dispatch(.setBusy(cardId: card.id, busy: false))
+                        }
+                    },
+                    onCleanupWorktree: { Task { await cleanupWorktree(cardId: card.id) } },
+                    canCleanupWorktree: canCleanupWorktree(for: card),
+                    onArchive: nil,
+                    onDelete: { presentDialog(.confirmDelete(cardId: card.id)) },
+                    onMoveToProject: { path in store.dispatch(.moveCardToProject(cardId: card.id, projectPath: path)) },
+                    onMoveToFolder: { selectFolderForMove(cardId: card.id) },
+                    onMigrateAssistant: { target in
+                        presentDialog(.confirmMigration(cardId: card.id, targetAssistant: target))
                     }
-                },
-                onCleanupWorktree: { Task { await cleanupWorktree(cardId: card.id) } },
-                canCleanupWorktree: canCleanupWorktree(for: card),
-                onDelete: { presentDialog(.confirmDelete(cardId: card.id)) },
+                ),
+                showBranchInfo: true,
                 availableProjects: projectList,
-                onMoveToProject: { path in store.dispatch(.moveCardToProject(cardId: card.id, projectPath: path)) },
-                onMoveToFolder: { selectFolderForMove(cardId: card.id) },
-                enabledAssistants: assistantRegistry.available,
-                onMigrateAssistant: { target in
-                    presentDialog(.confirmMigration(cardId: card.id, targetAssistant: target))
-                }
+                enabledAssistants: assistantRegistry.available
             )
         } label: {
             Image(systemName: "ellipsis")

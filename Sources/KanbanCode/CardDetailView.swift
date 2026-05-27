@@ -1589,31 +1589,34 @@ struct CardDetailView: View {
         Menu {
             CardActionsMenu(
                 card: card,
+                actions: CardActionsMenuActions(
+                    onStart: { onResume() },
+                    onResume: { onResume() },
+                    onFork: onFork,
+                    onRenameRequest: { showRenameSheet = true },
+                    onCopyResumeCmd: { copyResumeCommand() },
+                    onCopyConversationMarkdown: {
+                        Task { await copyConversationMarkdown() }
+                    },
+                    onCheckpoint: {
+                        checkpointMode = true
+                        selectedTab = .history
+                    },
+                    onAddLink: { showAddLink = true },
+                    onUnlink: isExpanded ? onUnlink : nil,
+                    onDiscover: onDiscover,
+                    onCleanupWorktree: onCleanupWorktree,
+                    canCleanupWorktree: canCleanupWorktree,
+                    onArchive: nil,
+                    onDelete: { onDeleteCard(); onDismiss() },
+                    onMoveToProject: onMoveToProject,
+                    onMoveToFolder: onMoveToFolder,
+                    onMigrateAssistant: onMigrateAssistant
+                ),
                 showBranchInfo: isExpanded,
                 githubBaseURL: githubBaseURL,
-                onStart: { onResume() },
-                onResume: { onResume() },
-                onFork: onFork,
-                onRenameRequest: { showRenameSheet = true },
-                onCopyResumeCmd: { copyResumeCommand() },
-                onCopyConversationMarkdown: {
-                    Task { await copyConversationMarkdown() }
-                },
-                onCheckpoint: {
-                    checkpointMode = true
-                    selectedTab = .history
-                },
-                onAddLink: { showAddLink = true },
-                onUnlink: isExpanded ? onUnlink : nil,
-                onDiscover: onDiscover,
-                onCleanupWorktree: onCleanupWorktree,
-                canCleanupWorktree: canCleanupWorktree,
-                onDelete: { onDeleteCard(); onDismiss() },
                 availableProjects: availableProjects,
-                onMoveToProject: onMoveToProject,
-                onMoveToFolder: onMoveToFolder,
-                enabledAssistants: enabledAssistants,
-                onMigrateAssistant: onMigrateAssistant
+                enabledAssistants: enabledAssistants
             )
         } label: {
             Image(systemName: "ellipsis")

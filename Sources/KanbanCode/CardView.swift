@@ -5,6 +5,7 @@ import KanbanCodeCore
 struct CardView: View {
     let card: KanbanCodeCard
     let isSelected: Bool
+    let onCopyConversationMarkdown: () -> Void
     var onSelect: () -> Void = {}
     var onStart: () -> Void = {}
     var onResume: () -> Void = {}
@@ -96,21 +97,27 @@ struct CardView: View {
         .contextMenu {
             CardActionsMenu(
                 card: card,
-                onStart: onStart,
-                onResume: onResume,
-                onFork: onFork,
-                onRenameRequest: onRenameRequest,
-                onCopyResumeCmd: onCopyResumeCmd,
-                onDiscover: onDiscover,
-                onCleanupWorktree: onCleanupWorktree,
-                canCleanupWorktree: canCleanupWorktree,
-                onArchive: onArchive,
-                onDelete: onDelete,
+                actions: CardActionsMenuActions(
+                    onStart: onStart,
+                    onResume: onResume,
+                    onFork: onFork,
+                    onRenameRequest: onRenameRequest,
+                    onCopyResumeCmd: onCopyResumeCmd,
+                    onCopyConversationMarkdown: onCopyConversationMarkdown,
+                    onCheckpoint: nil,
+                    onAddLink: nil,
+                    onUnlink: nil,
+                    onDiscover: onDiscover,
+                    onCleanupWorktree: onCleanupWorktree,
+                    canCleanupWorktree: canCleanupWorktree,
+                    onArchive: onArchive,
+                    onDelete: onDelete,
+                    onMoveToProject: onMoveToProject,
+                    onMoveToFolder: onMoveToFolder,
+                    onMigrateAssistant: onMigrateAssistant
+                ),
                 availableProjects: availableProjects,
-                onMoveToProject: onMoveToProject,
-                onMoveToFolder: onMoveToFolder,
-                enabledAssistants: enabledAssistants,
-                onMigrateAssistant: onMigrateAssistant
+                enabledAssistants: enabledAssistants
             )
         }
     }

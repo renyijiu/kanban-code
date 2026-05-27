@@ -14,6 +14,7 @@ struct BoardView: View {
     var onResumeCard: (String) -> Void = { _ in }
     var onForkCard: (String, Bool) -> Void = { _, _ in }
     var onCopyResumeCmd: (String) -> Void = { _ in }
+    var onCopyConversationMarkdown: (String) -> Void = { _ in }
     var onDiscoverCard: (String) -> Void = { _ in }
     var onCleanupWorktree: (String) -> Void = { _ in }
     var canCleanupWorktree: (String) -> Bool = { _ in true }
@@ -116,6 +117,7 @@ struct BoardView: View {
                             onResumeCard: onResumeCard,
                             onForkCard: onForkCard,
                             onCopyResumeCmd: onCopyResumeCmd,
+                            onCopyConversationMarkdown: onCopyConversationMarkdown,
                             onDiscoverCard: onDiscoverCard,
                             onCleanupWorktree: onCleanupWorktree,
                             canCleanupWorktree: canCleanupWorktree,

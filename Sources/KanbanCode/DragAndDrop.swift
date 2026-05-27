@@ -39,6 +39,7 @@ struct DroppableColumnView: View {
     var onResumeCard: (String) -> Void = { _ in }
     var onForkCard: (String, Bool) -> Void = { _, _ in }
     var onCopyResumeCmd: (String) -> Void = { _ in }
+    var onCopyConversationMarkdown: (String) -> Void = { _ in }
     var onDiscoverCard: (String) -> Void = { _ in }
     var onCleanupWorktree: (String) -> Void = { _ in }
     var canCleanupWorktree: (String) -> Bool = { _ in true }
@@ -263,6 +264,7 @@ struct DroppableColumnView: View {
         CardView(
             card: card,
             isSelected: card.id == selectedCardId,
+            onCopyConversationMarkdown: { onCopyConversationMarkdown(card.id) },
             onSelect: {
                 let newId = selectedCardId == card.id ? nil : card.id
                 selectedCardId = newId
