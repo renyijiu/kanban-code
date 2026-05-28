@@ -361,6 +361,53 @@ export function killTmuxSession(name: string): { ok: boolean; error?: string } {
   }
 }
 
+/// Locate the newest Codex rollout (.jsonl) for a session by working directory.
+/// Codex mints its own session id, so we can't address the file by our session
+/// id like Claude; instead each rollout's first line (session_meta) carries the
+/// cwd, and a per-agent workspace is unique, so we match on that and take the
+/// most recently modified. Only the first line is read, so this stays cheap even
+/// as rollouts grow.
+export function findCodexRollout(cwd: string): string | undefined {
+  const base = join(process.env.CODEX_HOME ?? join(homedir(), ".codex"), "sessions");
+  if (!existsSync(base)) return undefined;
+  let best: { path: string; mtime: number } | undefined;
+  const walk = (dir: string): void => {
+    let entries: import("node:fs").Dirent[];
+    try {
+      entries = readdirSync(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const e of entries) {
+      const full = join(dir, e.name);
+      if (e.isDirectory()) {
+        walk(full);
+      } else if (e.name.startsWith("rollout-") && e.name.endsWith(".jsonl")) {
+        try {
+          // The session_meta first line can be very large (Codex embeds its full
+          // base_instructions), so we don't JSON.parse it; cwd appears early, so
+          // a bounded read + regex is robust regardless of the line length.
+          const fd = openSync(full, "r");
+          const buf = Buffer.alloc(65536);
+          const n = readSync(fd, buf, 0, buf.length, 0);
+          closeSync(fd);
+          const head = buf.toString("utf-8", 0, n);
+          const m = head.match(/"cwd"\s*:\s*"((?:[^"\\]|\\.)*)"/);
+          const foundCwd = m ? JSON.parse(`"${m[1]}"`) : undefined;
+          if (foundCwd === cwd) {
+            const mtime = statSync(full).mtimeMs;
+            if (!best || mtime > best.mtime) best = { path: full, mtime };
+          }
+        } catch {
+          /* skip unreadable/partial */
+        }
+      }
+    }
+  };
+  walk(base);
+  return best?.path;
+}
+
 /// Locate a Claude session transcript by scanning ~/.claude/projects/<dir>/.
 /// Encoding-independent: finds <sessionId>.jsonl wherever Claude placed it.
 export function findSessionJsonl(sessionId: string): string | undefined {

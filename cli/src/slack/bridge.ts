@@ -1,12 +1,14 @@
 import { existsSync, statSync, openSync, readSync, closeSync } from "node:fs";
+import { join } from "node:path";
 import { SocketModeClient } from "@slack/socket-mode";
 import { SlackClient } from "./client.js";
 import { routeSlackMessage, ChannelMapping } from "./inbound.js";
-import { formatTranscriptLines } from "./format.js";
+import { formatTranscriptLines, formatCodexRolloutLines } from "./format.js";
 import { loadAgentsConfig } from "../agents/config.js";
 import { agentIdentity } from "../agents/identity.js";
+import { Runtime } from "../agents/runtime.js";
 import { recordAnnounceSuppress } from "./announce-suppress.js";
-import { findSessionJsonl, pasteTmuxPrompt } from "../data.js";
+import { findSessionJsonl, findCodexRollout, pasteTmuxPrompt } from "../data.js";
 
 export interface BridgeOptions {
   botToken: string;
@@ -18,7 +20,10 @@ export interface BridgeOptions {
 
 interface TailState {
   slug: string;
+  runtime: Runtime;
   sessionId: string;
+  /// For Codex, the per-agent workspace used to locate its rollout by cwd.
+  cwd?: string;
   channelId: string;
   path?: string;
   offset: number;
@@ -64,6 +69,24 @@ export async function runSlackBridge(opts: BridgeOptions): Promise<void> {
 
   const mapping: ChannelMapping = {};
   const tails: TailState[] = [];
+
+  // Slack-human messages relayed into a Codex agent reappear in that agent's
+  // rollout as user_message events, which the poll loop would otherwise echo
+  // back to the channel as ">>> Received user message" (a duplicate of the
+  // human's own message). Claude suppresses this via the daemon's announce-
+  // suppress markers, but the Codex rollout mirror runs in this process, so we
+  // track recent relays here and drop the matching echo. Keyed by slug.
+  const recentRelays = new Map<string, { text: string; ts: number }[]>();
+  const RELAY_ECHO_TTL_MS = 90_000;
+  const consumeRelayEcho = (slug: string, mirrored: string): boolean => {
+    const list = recentRelays.get(slug);
+    if (!list?.length) return false;
+    const now = Date.now();
+    const i = list.findIndex((r) => now - r.ts <= RELAY_ECHO_TTL_MS && mirrored.includes(r.text.trim()));
+    if (i < 0) return false;
+    list.splice(i, 1); // consume so a genuine resend later is not swallowed
+    return true;
+  };
   for (const a of agents) {
     const channelId = await client.resolveChannelId(a.slackChannel!);
     if (!channelId) {
@@ -71,24 +94,40 @@ export async function runSlackBridge(opts: BridgeOptions): Promise<void> {
       continue;
     }
     mapping[channelId] = a.slug;
-    const sessionId = agentIdentity(a.slug).sessionId;
-    const path = findSessionJsonl(sessionId);
+    const runtime = (a.runtime ?? "claude") as Runtime;
+    const sessionId = agentIdentity(a.slug, runtime).sessionId;
+    const cwd = join(file.workspacesDir, a.slug);
+    const path = runtime === "codex" ? findCodexRollout(cwd) : findSessionJsonl(sessionId);
     // Start at EOF so we mirror only new activity, not the whole backlog.
-    tails.push({ slug: a.slug, sessionId, channelId, path, offset: path ? statSync(path).size : 0 });
+    tails.push({ slug: a.slug, runtime, sessionId, cwd, channelId, path, offset: path ? statSync(path).size : 0 });
   }
 
   // agent -> slack
   setInterval(async () => {
     for (const t of tails) {
       if (!t.path) {
-        t.path = findSessionJsonl(t.sessionId);
+        t.path = t.runtime === "codex" ? findCodexRollout(t.cwd!) : findSessionJsonl(t.sessionId);
         if (t.path) t.offset = statSync(t.path).size; // skip backlog on first discovery
         continue;
+      }
+      // Codex writes a fresh rollout file per session, so a restart (or its own
+      // auto-compaction) rotates the file. Follow the newest one from its start
+      // so a relaunched agent keeps mirroring without restarting the bridge.
+      if (t.runtime === "codex") {
+        const latest = findCodexRollout(t.cwd!);
+        if (latest && latest !== t.path) {
+          t.path = latest;
+          t.offset = 0;
+        }
       }
       if (!existsSync(t.path)) continue;
       const { objs, newOffset } = readAppendedLines(t.path, t.offset);
       t.offset = newOffset;
-      for (const post of formatTranscriptLines(objs)) {
+      const posts = t.runtime === "codex" ? formatCodexRolloutLines(objs) : formatTranscriptLines(objs);
+      for (const post of posts) {
+        // Don't echo a prompt we just relayed from a Slack human (it's already
+        // in the channel as their message).
+        if (t.runtime === "codex" && post.role === "user" && consumeRelayEcho(t.slug, post.text)) continue;
         try {
           await client.post(t.channelId, post.text);
         } catch (e) {
@@ -108,6 +147,10 @@ export async function runSlackBridge(opts: BridgeOptions): Promise<void> {
       // (it already appears there as that person's Slack message). Recorded
       // before the paste so the marker is in place before UserPromptSubmit.
       recordAnnounceSuppress(agentIdentity(decision.slug).sessionId);
+      // Also remember it for the in-process Codex rollout-echo guard above.
+      const relays = recentRelays.get(decision.slug) ?? [];
+      relays.push({ text: decision.text, ts: Date.now() });
+      recentRelays.set(decision.slug, relays);
       pasteTmuxPrompt(decision.slug, decision.text); // tmux session name == slug
     }
   });

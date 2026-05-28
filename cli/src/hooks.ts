@@ -1,4 +1,5 @@
 import { readFileSync, writeFileSync, mkdirSync, existsSync, chmodSync } from "node:fs";
+import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { kanbanHome, claudeSettingsPath } from "./paths.js";
 import { sortedStringify } from "./cards.js";
@@ -8,6 +9,19 @@ import { sortedStringify } from "./cards.js";
 /// activity tracking. Mirrors the Swift HookManager.
 export const HOOK_EVENTS = ["Stop", "Notification", "SessionStart", "SessionEnd", "UserPromptSubmit"];
 
+/// Codex hook events we register (Codex exposes the same names; we only need the
+/// subset that drives the daemon: Stop for auto-send, UserPromptSubmit for the
+/// Slack receipt mirror, SessionStart/Stop for activity).
+export const CODEX_HOOK_EVENTS = ["SessionStart", "UserPromptSubmit", "Stop"];
+
+function codexConfigDir(): string {
+  return process.env.CODEX_HOME ?? join(homedir(), ".codex");
+}
+
+function codexHooksPath(): string {
+  return join(codexConfigDir(), "hooks.json");
+}
+
 function defaultHookScriptPath(): string {
   return join(kanbanHome(), "hook.sh");
 }
@@ -16,8 +30,8 @@ function defaultHookScriptPath(): string {
 /// dependency (lightweight grep parsing). Honors KANBAN_CODE_HOME so the same
 /// script works in tests and in alternate deployments.
 const HOOK_SCRIPT = `#!/usr/bin/env bash
-# Kanban hook handler. Receives JSON on stdin from Claude Code hooks and appends
-# a timestamped event line to <kanban-home>/hook-events.jsonl.
+# Kanban hook handler. Receives JSON on stdin from Claude Code or Codex hooks and
+# appends a timestamped event line to <kanban-home>/hook-events.jsonl.
 set -euo pipefail
 
 EVENTS_DIR="\${KANBAN_CODE_HOME:-\$HOME/.kanban-code}"
@@ -32,6 +46,13 @@ transcript=$(echo "$input" | grep -o '"transcript_path":"[^"]*"' | head -1 | cut
 
 if [ -z "$session_id" ]; then
     session_id=$(echo "$input" | grep -o '"sessionId":"[^"]*"' | head -1 | cut -d'"' -f4)
+fi
+# The launcher exports KANBAN_SESSION_ID (the stable uuidv5 of the slug) into the
+# session, so events correlate to the agent's card regardless of the id the
+# runtime mints internally. This is what lets Codex (which generates its own
+# session id) share the daemon/bridge correlation path with Claude.
+if [ -n "\${KANBAN_SESSION_ID:-}" ]; then
+    session_id="\$KANBAN_SESSION_ID"
 fi
 [ -z "$session_id" ] && exit 0
 
@@ -145,7 +166,48 @@ export function installHooks(opts: InstallHooksOptions = {}): InstallHooksResult
   mkdirSync(dirname(settingsPath), { recursive: true });
   writeFileSync(settingsPath, sortedStringify(root));
 
+  // NOTE: Codex hooks are intentionally NOT installed here. Codex 0.134.0 gates
+  // command hooks behind an interactive trust prompt that --dangerously-bypass-
+  // hook-trust does not reliably suppress in the inline TUI, which hangs the
+  // headless session on a modal. Codex agents are instead mirrored to Slack via
+  // their rollout transcript (see findCodexRollout / formatCodexRolloutLines in
+  // the bridge), and steered via tmux paste, so no Codex hooks are needed.
+  // installCodexHooks() remains available for when Codex honors trust bypass.
+
   return { settingsPath, hookScriptPath, statuslinePath, events: HOOK_EVENTS };
+}
+
+export interface InstallCodexHooksOptions {
+  hooksPath?: string;
+  hookScriptPath?: string;
+}
+
+/// Install Codex hooks (~/.codex/hooks.json) pointing at the shared hook.sh.
+/// Idempotent and additive: preserves any other registered hooks for each event.
+export function installCodexHooks(opts: InstallCodexHooksOptions = {}): { hooksPath: string; events: string[] } {
+  const hooksPath = opts.hooksPath ?? codexHooksPath();
+  const hookScriptPath = opts.hookScriptPath ?? defaultHookScriptPath();
+  deployScript(hookScriptPath, HOOK_SCRIPT);
+
+  // Codex's hooks.json nests events under a top-level "hooks" key (mirrors the
+  // config.toml [hooks] table); without the wrapper Codex ignores the file.
+  const root = readJson(hooksPath);
+  const hooks = (root.hooks ?? {}) as Record<string, any[]>;
+  const hookEntry = { type: "command", command: hookScriptPath };
+  for (const event of CODEX_HOOK_EVENTS) {
+    const groups: any[] = Array.isArray(hooks[event]) ? hooks[event] : [];
+    const present = groups.some((g) => (g?.hooks ?? []).some((h: any) => h?.command === hookScriptPath));
+    if (!present) {
+      if (groups.length === 0) groups.push({ hooks: [hookEntry] });
+      else groups[0].hooks = [...(groups[0].hooks ?? []), hookEntry];
+    }
+    hooks[event] = groups;
+  }
+  root.hooks = hooks;
+
+  mkdirSync(dirname(hooksPath), { recursive: true });
+  writeFileSync(hooksPath, sortedStringify(root));
+  return { hooksPath, events: CODEX_HOOK_EVENTS };
 }
 
 /// True if our hook script is registered for every required event.

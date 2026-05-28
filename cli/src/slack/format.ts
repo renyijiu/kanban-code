@@ -14,6 +14,17 @@ function truncate(s: string, max = MAX_TEXT): string {
   return t.length > max ? t.slice(0, max) + "…" : t;
 }
 
+/// Header shown above each mirrored prompt. It marks the text as the input the
+/// agent received (not the agent's own reply), so a reader can tell the two
+/// apart in the channel.
+export const RECEIVED_MESSAGE_HEADER = ">>> Received user message";
+
+/// Format an injected prompt for the channel: the header, then the body in
+/// italics (Slack mrkdwn uses _underscores_ for italic; * and ** do not work).
+export function formatReceivedMessage(text: string): string {
+  return `${RECEIVED_MESSAGE_HEADER}\n\n_${text}_`;
+}
+
 /// Keep the last 3 path components (mirrors TranscriptReader.shortenPath).
 export function shortenPath(path: string): string {
   const parts = path.split("/").filter(Boolean);
@@ -125,5 +136,31 @@ export function formatTranscriptLines(objs: any[]): SlackPost[] {
     }
   }
   flush();
+  return posts;
+}
+
+/// Format Codex rollout (.jsonl) records into Slack posts. Codex logs a stream
+/// of records; we mirror the prompts the agent receives (user_message), the
+/// agent's own messages (its "movement"), and the commands it runs, skipping
+/// reasoning/system noise so the channel reads like the Claude mirror. Codex
+/// gates command hooks behind a trust prompt, so this rollout tail is also how
+/// a received prompt is announced (the Claude path uses the UserPromptSubmit
+/// hook). Event shapes: event_msg{payload:{type:"user_message",message}} for an
+/// injected prompt, {type:"agent_message",message} for assistant text, and
+/// {type:"exec_command_begin",command} for shell runs.
+export function formatCodexRolloutLines(objs: any[]): SlackPost[] {
+  const posts: SlackPost[] = [];
+  for (const o of objs) {
+    if (o?.type !== "event_msg") continue;
+    const p = o.payload ?? {};
+    if (p.type === "user_message" && typeof p.message === "string" && p.message.trim()) {
+      posts.push({ role: "user", text: formatReceivedMessage(truncate(p.message)) });
+    } else if (p.type === "agent_message" && typeof p.message === "string" && p.message.trim()) {
+      posts.push({ role: "assistant", text: truncate(p.message) });
+    } else if (p.type === "exec_command_begin") {
+      const cmd = Array.isArray(p.command) ? p.command.join(" ") : String(p.command ?? "");
+      if (cmd.trim()) posts.push({ role: "assistant", text: fenceBlock(`$ ${truncate(cmd, 300)}`) });
+    }
+  }
   return posts;
 }

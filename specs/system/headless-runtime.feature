@@ -43,3 +43,14 @@ Feature: Headless runtime engine (no macOS app)
     When the box finishes booting
     Then reconcile-on-boot resumes every configured agent with "--resume <uuid>"
     And the daemon is restarted by the service manager
+
+  Scenario: An agent can be driven by the Codex runtime instead of Claude
+    Given an agent declares "runtime: codex" in the agents config
+    When the reconciler launches it
+    Then it runs "codex --no-alt-screen --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust" in tmux (no Claude --session-id/--resume)
+    And the daemon's context-threshold self-compaction is skipped for it (Codex auto-compacts and exposes no context usage)
+    And sending and Slack-inbound steering work unchanged because they paste into the tmux session by slug
+    And its whole conversation is mirrored to Slack automatically by tailing its Codex rollout transcript (located by the agent's workspace cwd): received prompts as ">>> Received user message", the agent's own messages, and the commands it runs, just like the Claude hook mirror, since Codex 0.134.0 gates command hooks behind a trust prompt that --dangerously-bypass-hook-trust does not suppress in the inline TUI
+    And the agent is never instructed to post to Slack itself; it communicates normally and the bridge does the mirroring
+    And a prompt relayed from a Slack human is not echoed back to the channel (it is already there as that person's message)
+    And when Codex rotates its rollout file (a relaunched session or its own auto-compaction) the bridge follows the newest rollout so mirroring continues without a bridge restart
