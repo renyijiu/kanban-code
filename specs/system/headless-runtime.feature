@@ -49,7 +49,6 @@ Feature: Headless runtime engine (no macOS app)
     Given an agent declares "runtime: codex" in the agents config
     When the reconciler launches it
     Then it runs "codex --no-alt-screen --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust" in tmux (no Claude --session-id/--resume)
-    And the launcher exports KANBAN_SESSION_ID so the shared hook.sh correlates Codex events to the agent's card
-    And Codex hooks (~/.codex/hooks.json) feed the same hook-events.jsonl, so Slack steering and auto-send still work
     And the daemon's context-threshold self-compaction is skipped for it (Codex auto-compacts and exposes no context usage)
     And sending and Slack-inbound steering work unchanged because they paste into the tmux session by slug
+    And its movement is mirrored to Slack by tailing its Codex rollout transcript (located by the agent's workspace cwd), since Codex 0.134.0 gates command hooks behind a trust prompt that --dangerously-bypass-hook-trust does not suppress in the inline TUI
