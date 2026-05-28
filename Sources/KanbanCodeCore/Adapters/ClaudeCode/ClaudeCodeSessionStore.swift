@@ -407,6 +407,10 @@ public final class ClaudeCodeSessionStore: SessionStore, @unchecked Sendable {
             // Fast string check — skip lines that aren't searchable records.
             guard line.contains("\"type\"") else { continue }
             guard line.contains("\"user\"") || line.contains("\"assistant\"") || line.contains("\"pr-link\"") else { continue }
+            if query.canRawPrefilter {
+                let lowerLine = line.lowercased()
+                guard query.exactMatchCount(in: lowerLine) > 0 else { continue }
+            }
 
             guard let lineData = line.data(using: .utf8),
                   let obj = try? JSONSerialization.jsonObject(with: lineData) as? [String: Any],

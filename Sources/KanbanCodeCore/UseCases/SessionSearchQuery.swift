@@ -11,6 +11,10 @@ public struct SessionSearchQuery: Sendable, Equatable {
         terms.isEmpty && exactPhrases.isEmpty
     }
 
+    public var canRawPrefilter: Bool {
+        requiresExactMatch && !exactPhrases.isEmpty
+    }
+
     public var snippetTerms: [String] {
         exactPhrases + terms
     }
@@ -112,7 +116,8 @@ public struct SessionSearchQuery: Sendable, Equatable {
         var numbers: [String] = []
         let patterns = [
             #"(?<![a-z0-9])#([0-9]{1,8})(?![0-9])"#,
-            #"/pull/([0-9]{1,8})(?![0-9])"#
+            #"/pull/([0-9]{1,8})(?![0-9])"#,
+            #"^\s*([0-9]{1,8})\s*$"#
         ]
 
         for pattern in patterns {

@@ -638,7 +638,14 @@ private struct CardSearchIndexItem {
         title = card.displayTitle.lowercased()
         project = (card.projectName ?? "").lowercased()
         branch = (card.link.worktreeLink?.branch ?? "").lowercased()
-        other = "\(card.link.projectPath ?? "") \(card.session?.firstPrompt ?? "") \(card.link.promptBody ?? "") \(card.link.sessionLink?.sessionId ?? "") \(card.link.id)".lowercased()
+        let prText = card.link.prLinks
+            .map { pr in
+                ["pr #\(pr.number)", "#\(pr.number)", "pull/\(pr.number)", pr.url, pr.title]
+                    .compactMap { $0 }
+                    .joined(separator: " ")
+            }
+            .joined(separator: " ")
+        other = "\(card.link.projectPath ?? "") \(card.session?.firstPrompt ?? "") \(card.link.promptBody ?? "") \(card.link.sessionLink?.sessionId ?? "") \(card.link.id) \(prText)".lowercased()
         titleWords = title.split { !$0.isLetter && !$0.isNumber }.map(String.init)
         projectWords = project.split { !$0.isLetter && !$0.isNumber }.map(String.init)
         isActiveColumn = [.inProgress, .waiting, .inReview, .done].contains(card.column)
