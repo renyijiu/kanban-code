@@ -86,13 +86,15 @@ describe("installCodexHooks", () => {
     const r = installCodexHooks({ hooksPath, hookScriptPath });
     assert.deepEqual(r.events, ["SessionStart", "UserPromptSubmit", "Stop"]);
     const json = JSON.parse(readFileSync(hooksPath, "utf-8"));
+    // Codex requires the top-level "hooks" wrapper.
+    assert.ok(json.hooks, "events must be nested under a top-level hooks key");
     for (const ev of r.events) {
-      assert.equal(json[ev][0].hooks[0].command, hookScriptPath);
+      assert.equal(json.hooks[ev][0].hooks[0].command, hookScriptPath);
     }
     // Re-install does not duplicate the entry.
     installCodexHooks({ hooksPath, hookScriptPath });
     const json2 = JSON.parse(readFileSync(hooksPath, "utf-8"));
-    assert.equal(json2.Stop[0].hooks.length, 1);
+    assert.equal(json2.hooks.Stop[0].hooks.length, 1);
   });
 });
 

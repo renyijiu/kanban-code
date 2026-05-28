@@ -186,17 +186,21 @@ export function installCodexHooks(opts: InstallCodexHooksOptions = {}): { hooksP
   const hookScriptPath = opts.hookScriptPath ?? defaultHookScriptPath();
   deployScript(hookScriptPath, HOOK_SCRIPT);
 
+  // Codex's hooks.json nests events under a top-level "hooks" key (mirrors the
+  // config.toml [hooks] table); without the wrapper Codex ignores the file.
   const root = readJson(hooksPath);
+  const hooks = (root.hooks ?? {}) as Record<string, any[]>;
   const hookEntry = { type: "command", command: hookScriptPath };
   for (const event of CODEX_HOOK_EVENTS) {
-    const groups: any[] = Array.isArray(root[event]) ? root[event] : [];
+    const groups: any[] = Array.isArray(hooks[event]) ? hooks[event] : [];
     const present = groups.some((g) => (g?.hooks ?? []).some((h: any) => h?.command === hookScriptPath));
     if (!present) {
       if (groups.length === 0) groups.push({ hooks: [hookEntry] });
       else groups[0].hooks = [...(groups[0].hooks ?? []), hookEntry];
     }
-    root[event] = groups;
+    hooks[event] = groups;
   }
+  root.hooks = hooks;
 
   mkdirSync(dirname(hooksPath), { recursive: true });
   writeFileSync(hooksPath, sortedStringify(root));
