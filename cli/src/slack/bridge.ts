@@ -69,6 +69,24 @@ export async function runSlackBridge(opts: BridgeOptions): Promise<void> {
 
   const mapping: ChannelMapping = {};
   const tails: TailState[] = [];
+
+  // Slack-human messages relayed into a Codex agent reappear in that agent's
+  // rollout as user_message events, which the poll loop would otherwise echo
+  // back to the channel as ">>> Received user message" (a duplicate of the
+  // human's own message). Claude suppresses this via the daemon's announce-
+  // suppress markers, but the Codex rollout mirror runs in this process, so we
+  // track recent relays here and drop the matching echo. Keyed by slug.
+  const recentRelays = new Map<string, { text: string; ts: number }[]>();
+  const RELAY_ECHO_TTL_MS = 90_000;
+  const consumeRelayEcho = (slug: string, mirrored: string): boolean => {
+    const list = recentRelays.get(slug);
+    if (!list?.length) return false;
+    const now = Date.now();
+    const i = list.findIndex((r) => now - r.ts <= RELAY_ECHO_TTL_MS && mirrored.includes(r.text.trim()));
+    if (i < 0) return false;
+    list.splice(i, 1); // consume so a genuine resend later is not swallowed
+    return true;
+  };
   for (const a of agents) {
     const channelId = await client.resolveChannelId(a.slackChannel!);
     if (!channelId) {
@@ -97,6 +115,9 @@ export async function runSlackBridge(opts: BridgeOptions): Promise<void> {
       t.offset = newOffset;
       const posts = t.runtime === "codex" ? formatCodexRolloutLines(objs) : formatTranscriptLines(objs);
       for (const post of posts) {
+        // Don't echo a prompt we just relayed from a Slack human (it's already
+        // in the channel as their message).
+        if (t.runtime === "codex" && post.role === "user" && consumeRelayEcho(t.slug, post.text)) continue;
         try {
           await client.post(t.channelId, post.text);
         } catch (e) {
@@ -116,6 +137,10 @@ export async function runSlackBridge(opts: BridgeOptions): Promise<void> {
       // (it already appears there as that person's Slack message). Recorded
       // before the paste so the marker is in place before UserPromptSubmit.
       recordAnnounceSuppress(agentIdentity(decision.slug).sessionId);
+      // Also remember it for the in-process Codex rollout-echo guard above.
+      const relays = recentRelays.get(decision.slug) ?? [];
+      relays.push({ text: decision.text, ts: Date.now() });
+      recentRelays.set(decision.slug, relays);
       pasteTmuxPrompt(decision.slug, decision.text); // tmux session name == slug
     }
   });

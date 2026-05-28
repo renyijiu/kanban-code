@@ -60,9 +60,10 @@ describe("runtime descriptor", () => {
 });
 
 describe("formatCodexRolloutLines", () => {
-  test("mirrors agent messages and exec commands, skips reasoning/system noise", () => {
+  test("mirrors received prompts, agent messages and exec commands, skips reasoning/system noise", () => {
     const objs = [
       { type: "session_meta", payload: { cwd: "/x" } },
+      { type: "event_msg", payload: { type: "user_message", message: "Please review PR 519.", images: [] } },
       { type: "event_msg", payload: { type: "task_started" } },
       { type: "event_msg", payload: { type: "agent_message", message: "I'll review the PR now." } },
       { type: "response_item", payload: { type: "reasoning", encrypted_content: "..." } },
@@ -70,11 +71,15 @@ describe("formatCodexRolloutLines", () => {
       { type: "event_msg", payload: { type: "agent_message", message: "No blockers; 2 nits." } },
     ];
     const posts = formatCodexRolloutLines(objs);
-    assert.equal(posts.length, 3);
-    assert.equal(posts[0].text, "I'll review the PR now.");
-    assert.match(posts[1].text, /gh pr view 519/);
-    assert.equal(posts[2].text, "No blockers; 2 nits.");
-    assert.ok(posts.every((p) => p.role === "assistant"));
+    assert.equal(posts.length, 4);
+    // The injected prompt is mirrored like the Claude UserPromptSubmit announce.
+    assert.equal(posts[0].role, "user");
+    assert.match(posts[0].text, /^>>> Received user message/);
+    assert.match(posts[0].text, /Please review PR 519\./);
+    assert.equal(posts[1].text, "I'll review the PR now.");
+    assert.match(posts[2].text, /gh pr view 519/);
+    assert.equal(posts[3].text, "No blockers; 2 nits.");
+    assert.ok(posts.slice(1).every((p) => p.role === "assistant"));
   });
 });
 

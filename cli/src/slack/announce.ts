@@ -8,16 +8,10 @@ import { homedir } from "node:os";
 /// agent's Slack channel. Messages relayed *from* a Slack human must NOT go
 /// through here, they already appear in Slack as that person's message.
 
-/// Header shown above each mirrored prompt. It marks the text as the input the
-/// agent received (not the agent's own reply), so a reader can tell the two
-/// apart in the channel.
-export const RECEIVED_MESSAGE_HEADER = ">>> Received user message";
-
-/// Format an injected prompt for the channel: the header, then the body in
-/// italics (Slack mrkdwn uses _underscores_ for italic; * and ** do not work).
-export function formatReceivedMessage(text: string): string {
-  return `${RECEIVED_MESSAGE_HEADER}\n\n_${text}_`;
-}
+// The received-message formatting lives in format.ts (all Slack rendering does);
+// re-exported here so the Claude announce path and existing imports stay stable.
+export { RECEIVED_MESSAGE_HEADER, formatReceivedMessage } from "./format.js";
+import { formatReceivedMessage } from "./format.js";
 
 function defaultConfigPath(): string {
   return process.env.KANBAN_AGENTS_CONFIG || join(homedir(), ".kanban-code", "agents.yaml");
