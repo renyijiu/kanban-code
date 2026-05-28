@@ -1,4 +1,5 @@
 import { existsSync, statSync, openSync, readSync, closeSync } from "node:fs";
+import { randomUUID } from "node:crypto";
 import { hookEventsPath } from "../paths.js";
 import { readLinks, readSessionContext, pasteTmuxPrompt } from "../data.js";
 import { upsertCard, isoNow } from "../cards.js";
@@ -285,14 +286,7 @@ export class Daemon {
       if (rule.thresholdTokens <= (this.lastTriggered.get(sessionId) ?? 0)) continue;
 
       if (rule.action === "queuePrompt") {
-        // Send the self-compact nudge straight away rather than queueing it for
-        // the next Stop. A resumed/idle session never hits Stop, so a queued
-        // nudge would never fire and context would coast up to the hard
-        // /compact (which then collides with whatever prompt lands next, e.g.
-        // the morning nudge). Claude queues pasted input and runs it after the
-        // current turn, so a busy agent still finishes gracefully while an idle
-        // one self-compacts immediately.
-        this.paste(sessionName, rule.message);
+        this.enqueueOnce(card.id, rule.message);
       } else {
         this.paste(sessionName, "/compact");
         this.announce(card.name ?? "", `🧹 context over ${Math.round(rule.thresholdTokens / 1000)}k - sending /compact`);
@@ -322,5 +316,14 @@ export class Daemon {
       updatedAt: isoNow(),
     };
     upsertCard(next);
+  }
+
+  private enqueueOnce(cardId: string, body: string): void {
+    const card = readLinks().find((c) => c.id === cardId);
+    if (!card) return;
+    const queue = card.queuedPrompts ?? [];
+    if (queue.some((p) => p.body.trim() === body.trim())) return; // already queued
+    const prompt: QueuedPrompt = { id: randomUUID(), body, sendAutomatically: true };
+    upsertCard({ ...card, queuedPrompts: [...queue, prompt], updatedAt: isoNow() });
   }
 }
