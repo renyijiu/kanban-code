@@ -110,6 +110,16 @@ export async function runSlackBridge(opts: BridgeOptions): Promise<void> {
         if (t.path) t.offset = statSync(t.path).size; // skip backlog on first discovery
         continue;
       }
+      // Codex writes a fresh rollout file per session, so a restart (or its own
+      // auto-compaction) rotates the file. Follow the newest one from its start
+      // so a relaunched agent keeps mirroring without restarting the bridge.
+      if (t.runtime === "codex") {
+        const latest = findCodexRollout(t.cwd!);
+        if (latest && latest !== t.path) {
+          t.path = latest;
+          t.offset = 0;
+        }
+      }
       if (!existsSync(t.path)) continue;
       const { objs, newOffset } = readAppendedLines(t.path, t.offset);
       t.offset = newOffset;
