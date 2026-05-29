@@ -37,7 +37,7 @@ describe("runtime descriptor", () => {
   test("codex builds inline + full-auto bypass args and never uses session-id", () => {
     const x = runtimeSpec("codex");
     assert.equal(x.bin, "codex");
-    assert.equal(x.canResume, false);
+    assert.equal(x.canResume, true);
     assert.equal(x.selfCompact, false);
     const args = x.buildArgs({ sessionId: "sid", slug: "agent", resume: false, skipPermissions: true, model: "gpt-5.5" });
     assert.deepEqual(args, [
@@ -49,6 +49,22 @@ describe("runtime descriptor", () => {
     ]);
     assert.ok(!args.includes("--session-id"));
     assert.ok(!args.includes("--resume"));
+  });
+
+  test("codex resume keeps the global flags before the subcommand and uses resume --last", () => {
+    const x = runtimeSpec("codex");
+    const args = x.buildArgs({ sessionId: "sid", slug: "agent", resume: true, skipPermissions: true });
+    assert.deepEqual(args, [
+      "--no-alt-screen",
+      "--dangerously-bypass-approvals-and-sandbox",
+      "--dangerously-bypass-hook-trust",
+      "resume",
+      "--last",
+    ]);
+    // The bypass flags must precede the subcommand (they are global, not
+    // resume-subcommand options), and no model is re-passed on resume.
+    assert.ok(args.indexOf("--dangerously-bypass-approvals-and-sandbox") < args.indexOf("resume"));
+    assert.ok(!args.includes("-m"));
   });
 
   test("isRuntime guards the union", () => {
