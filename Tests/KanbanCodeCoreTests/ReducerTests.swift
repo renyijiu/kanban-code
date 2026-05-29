@@ -472,6 +472,34 @@ struct ReducerTests {
         // async and would otherwise revert a concurrent addProject().
     }
 
+    @Test("reconciled emits no persist when links are unchanged")
+    func reconciledNoPersistWhenLinksUnchanged() {
+        let link = makeLink(id: "card_same", column: .backlog)
+        var state = stateWith([link])
+
+        let result = ReconciliationResult(
+            links: [link],
+            sessions: [],
+            activityMap: [:],
+            tmuxSessions: []
+        )
+        let effects = Reducer.reduce(state: &state, action: .reconciled(result))
+
+        #expect(effects.isEmpty)
+        #expect(state.links["card_same"] == link)
+    }
+
+    @Test("setRateLimitedRepos skips no-op card rebuild source changes")
+    func setRateLimitedReposSkipsNoOp() {
+        var state = AppState()
+        state.rateLimitedRepos = ["/repo"]
+
+        let effects = Reducer.reduce(state: &state, action: .setRateLimitedRepos(["/repo"]))
+
+        #expect(effects.isEmpty)
+        #expect(state.rateLimitedRepos == ["/repo"])
+    }
+
     // MARK: - Add Extra Terminal
 
     @Test("addExtraTerminal appends to extraSessions")

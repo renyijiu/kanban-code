@@ -1644,6 +1644,8 @@ public enum Reducer {
         // MARK: Background Reconciliation
 
         case .reconciled(let result):
+            var cardInputsChanged = false
+
             // Equality-gated assignments — only trigger @Observable change notifications
             // for fields that actually differ. Prevents unnecessary SwiftUI re-renders
             // when reconciliation produces the same data as the previous cycle.
@@ -1660,8 +1662,14 @@ public enum Reducer {
                 result.sessions.map { ($0.id, $0) },
                 uniquingKeysWith: { a, _ in a }
             )
-            if state.sessions != newSessions { state.sessions = newSessions }
-            if state.activityMap != result.activityMap { state.activityMap = result.activityMap }
+            if state.sessions != newSessions {
+                state.sessions = newSessions
+                cardInputsChanged = true
+            }
+            if state.activityMap != result.activityMap {
+                state.activityMap = result.activityMap
+                cardInputsChanged = true
+            }
 
             // Merge reconciled links using last-writer-wins on updatedAt.
             // Reconciliation takes seconds of async work. Any in-memory changes
@@ -1818,7 +1826,11 @@ public enum Reducer {
                 mergedLinks[id] = link
             }
 
-            if state.links != mergedLinks { state.links = mergedLinks }
+            let linksChanged = state.links != mergedLinks
+            if linksChanged {
+                state.links = mergedLinks
+                cardInputsChanged = true
+            }
             state.lastRefresh = Date()
             if state.isLoading { state.isLoading = false }
 
@@ -1826,9 +1838,14 @@ public enum Reducer {
             if let selectedId = state.selectedCardId,
                !mergedLinks.keys.contains(selectedId) {
                 state.selectedCardId = nil
+                cardInputsChanged = true
             }
 
-            return [.persistLinks(Array(mergedLinks.values))]
+            if cardInputsChanged {
+                state.rebuildCards()
+            }
+
+            return linksChanged ? [.persistLinks(Array(mergedLinks.values))] : []
 
         case .gitHubIssuesUpdated(let updatedLinks):
             let updatedIds = Set(updatedLinks.map(\.id))
@@ -1888,7 +1905,9 @@ public enum Reducer {
             return []
 
         case .setRateLimitedRepos(let repos):
+            guard state.rateLimitedRepos != repos else { return [] }
             state.rateLimitedRepos = repos
+            state.rebuildCards()
             return []
 
         case .setSelectedProject(let path):
@@ -1991,8 +2010,26 @@ public final class BoardStore: @unchecked Sendable {
     /// Actions that only toggle UI state and don't affect card data — skip rebuildCards().
     private static func needsRebuild(_ action: Action) -> Bool {
         switch action {
+        case .reconciled, .setRateLimitedRepos:
+            // These reducers diff their card inputs and rebuild only when the
+            // derived card snapshots can actually change. A periodic PR/status
+            // pass that produces the same links must not relayout the board.
+            return false
         case .setPaletteOpen, .setDetailExpanded, .setPromptEditorFocused,
              .showDialog, .dismissDialog, .setError, .setLoading, .setIsRefreshingBacklog:
+            return false
+        case .refreshChannels, .refreshChannelMessages, .channelsLoaded,
+             .channelMessagesLoaded, .createChannel, .sendChannelMessage,
+             .channelMessageAppended, .markChannelRead, .channelReadStateLoaded,
+             .refreshChannelReadState, .setAppFrontmost, .deleteChannel,
+             .renameChannel, .kickChannelMember, .draftsLoaded,
+             .setChannelDraft, .setDMDraft, .loadDrafts,
+             .refreshDMMessages, .dmMessagesLoaded, .sendDirectMessage,
+             .dmMessageAppended:
+            // Channel/DM history, read markers, and drafts are deliberately
+            // independent from card layout. Rebuilding cards here was a major
+            // source of channel hangs because every JSONL tail reload forced
+            // board/sidebar recomputation while chat was rendering.
             return false
         default:
             return true
@@ -2049,7 +2086,7 @@ public final class BoardStore: @unchecked Sendable {
     /// Dispatch an action and wait for all its effects to complete.
     public func dispatchAndWait(_ action: Action) async {
         let effects = Reducer.reduce(state: state, action: action)
-        state.rebuildCards()
+        if Self.needsRebuild(action) { state.rebuildCards() }
         await withTaskGroup(of: Void.self) { group in
             for effect in effects {
                 group.addTask { [weak self] in
