@@ -107,6 +107,20 @@ public actor ChannelsStore {
 
     // MARK: - Writes
 
+    private func writeAtomically(_ data: Data, toPath path: String) throws {
+        let tmp = "\(path).tmp.\(UUID().uuidString)"
+        do {
+            try data.write(to: URL(fileURLWithPath: tmp))
+            if FileManager.default.fileExists(atPath: path) {
+                try? FileManager.default.removeItem(atPath: path)
+            }
+            try FileManager.default.moveItem(atPath: tmp, toPath: path)
+        } catch {
+            try? FileManager.default.removeItem(atPath: tmp)
+            throw error
+        }
+    }
+
     public func ensureDirs() throws {
         let fm = FileManager.default
         try fm.createDirectory(atPath: baseDir, withIntermediateDirectories: true)
@@ -142,12 +156,7 @@ public actor ChannelsStore {
         try ensureDirs()
         let container = ChannelsContainer(channels: channels)
         let data = try encoder.encode(container)
-        let tmp = channelsPath + ".tmp"
-        try data.write(to: URL(fileURLWithPath: tmp))
-        if FileManager.default.fileExists(atPath: channelsPath) {
-            try? FileManager.default.removeItem(atPath: channelsPath)
-        }
-        try FileManager.default.moveItem(atPath: tmp, toPath: channelsPath)
+        try writeAtomically(data, toPath: channelsPath)
     }
 
     public func appendMessage(_ msg: ChannelMessage, to channel: String) throws {
@@ -249,12 +258,7 @@ public actor ChannelsStore {
     public func saveReadState(_ state: ReadState) throws {
         try ensureDirs()
         let data = try encoder.encode(state)
-        let tmp = readStatePath + ".tmp"
-        try data.write(to: URL(fileURLWithPath: tmp))
-        if FileManager.default.fileExists(atPath: readStatePath) {
-            try? FileManager.default.removeItem(atPath: readStatePath)
-        }
-        try FileManager.default.moveItem(atPath: tmp, toPath: readStatePath)
+        try writeAtomically(data, toPath: readStatePath)
     }
 
     // MARK: - Drafts (per-channel / per-DM draft messages)
@@ -283,12 +287,7 @@ public actor ChannelsStore {
     public func saveDrafts(_ drafts: DraftsState) throws {
         try ensureDirs()
         let data = try encoder.encode(drafts)
-        let tmp = draftsPath + ".tmp"
-        try data.write(to: URL(fileURLWithPath: tmp))
-        if FileManager.default.fileExists(atPath: draftsPath) {
-            try? FileManager.default.removeItem(atPath: draftsPath)
-        }
-        try FileManager.default.moveItem(atPath: tmp, toPath: draftsPath)
+        try writeAtomically(data, toPath: draftsPath)
     }
 
     // MARK: - Direct messages
