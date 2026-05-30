@@ -9,7 +9,7 @@ import { agentIdentity } from "../agents/identity.js";
 import { Runtime } from "../agents/runtime.js";
 import { recordAnnounceSuppress } from "./announce-suppress.js";
 import { writeThreadRoot, readThreadRoot } from "./thread-root.js";
-import { downloadSlackFile, formatPromptWithAttachments, DownloadedFile } from "./inbox.js";
+import { downloadSlackFile, formatPromptWithAttachments, DownloadedFile, sweepInbox, DEFAULT_RETENTION_DAYS } from "./inbox.js";
 import { findSessionJsonl, findCodexRollout, pasteTmuxPrompt } from "../data.js";
 
 export interface BridgeOptions {
@@ -244,4 +244,25 @@ export async function runSlackBridge(opts: BridgeOptions): Promise<void> {
   });
   await socket.start();
   console.error(`Slack bridge connected. Mirroring ${tails.length} agent(s).`);
+
+  // Drop attachments older than the retention window so the inbox does not
+  // grow without bound. We sweep on startup and then every hour. Override the
+  // window with SLACK_INBOX_RETENTION_DAYS=0 to disable, or any positive
+  // integer to override the default.
+  const retentionDays = Number.parseInt(process.env.SLACK_INBOX_RETENTION_DAYS ?? "", 10);
+  const sweepOpts = Number.isFinite(retentionDays)
+    ? { retentionDays }
+    : { retentionDays: DEFAULT_RETENTION_DAYS };
+  const runSweep = () => {
+    try {
+      const { removedFiles, removedDirs } = sweepInbox(sweepOpts);
+      if (removedFiles || removedDirs) {
+        console.error(`inbox sweep: removed ${removedFiles} file(s), ${removedDirs} empty dir(s)`);
+      }
+    } catch (e) {
+      console.error("inbox sweep failed:", e);
+    }
+  };
+  runSweep();
+  setInterval(runSweep, 60 * 60 * 1000);
 }

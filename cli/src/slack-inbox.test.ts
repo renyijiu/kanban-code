@@ -1,12 +1,13 @@
 import { test, describe } from "node:test";
 import { strict as assert } from "node:assert";
-import { mkdtempSync, readFileSync, readdirSync } from "node:fs";
+import { mkdtempSync, readFileSync, readdirSync, mkdirSync, writeFileSync, utimesSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   downloadSlackFile,
   formatPromptWithAttachments,
   sanitizeAttachmentName,
+  sweepInbox,
 } from "./slack/inbox.js";
 import type { SlackFile } from "./slack/inbound.js";
 
@@ -89,6 +90,51 @@ describe("downloadSlackFile", () => {
       () => downloadSlackFile({ name: "x" }, { botToken: "t", slug: "s", rootDir: root() }),
       /missing url_private/
     );
+  });
+});
+
+describe("sweepInbox", () => {
+  const seed = (rootDir: string, slug: string, name: string, ageMs: number) => {
+    const dir = join(rootDir, slug);
+    mkdirSync(dir, { recursive: true });
+    const path = join(dir, name);
+    writeFileSync(path, "x");
+    const mtime = (Date.now() - ageMs) / 1000;
+    utimesSync(path, mtime, mtime);
+    return path;
+  };
+
+  test("removes files older than the retention window, keeps fresh ones", () => {
+    const rootDir = root();
+    const oldPath = seed(rootDir, "scout", "old.png", 10 * 24 * 60 * 60 * 1000);
+    const newPath = seed(rootDir, "scout", "new.png", 1 * 60 * 1000);
+    const out = sweepInbox({ rootDir, retentionDays: 7 });
+    assert.equal(out.removedFiles, 1);
+    assert.equal(out.removedDirs, 0);
+    assert.equal(existsSync(oldPath), false);
+    assert.equal(existsSync(newPath), true);
+  });
+
+  test("removes the per-agent dir once it becomes empty", () => {
+    const rootDir = root();
+    seed(rootDir, "scout", "old1.png", 10 * 24 * 60 * 60 * 1000);
+    seed(rootDir, "scout", "old2.png", 10 * 24 * 60 * 60 * 1000);
+    const out = sweepInbox({ rootDir, retentionDays: 7 });
+    assert.equal(out.removedFiles, 2);
+    assert.equal(out.removedDirs, 1);
+    assert.equal(existsSync(join(rootDir, "scout")), false);
+  });
+
+  test("retentionDays <= 0 disables sweep (admin override)", () => {
+    const rootDir = root();
+    const oldPath = seed(rootDir, "scout", "old.png", 10 * 24 * 60 * 60 * 1000);
+    assert.deepEqual(sweepInbox({ rootDir, retentionDays: 0 }), { removedFiles: 0, removedDirs: 0 });
+    assert.equal(existsSync(oldPath), true);
+  });
+
+  test("missing root is a no-op (fresh box, no attachments ever)", () => {
+    const out = sweepInbox({ rootDir: join(root(), "does-not-exist"), retentionDays: 7 });
+    assert.deepEqual(out, { removedFiles: 0, removedDirs: 0 });
   });
 });
 

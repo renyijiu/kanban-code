@@ -3,7 +3,7 @@
 /// `Authorization: Bearer <bot token>` header — same scope (`files:read`)
 /// the bridge already needs to discover them.
 
-import { mkdirSync, writeFileSync, existsSync } from "node:fs";
+import { mkdirSync, writeFileSync, existsSync, readdirSync, statSync, rmSync, rmdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import type { SlackFile } from "./inbound.js";
@@ -93,4 +93,70 @@ export function formatPromptWithAttachments(text: string, files: DownloadedFile[
   if (files.length === 0) return text;
   const lines = files.map((f) => `[attachment: ${f.path}]`);
   return text ? `${text}\n\n${lines.join("\n")}` : lines.join("\n");
+}
+
+/// Default retention for downloaded attachments. The agent typically reads a
+/// file within seconds of it landing; a week gives plenty of slack for
+/// follow-up prompts that re-reference an earlier image while keeping the box
+/// from filling up over time.
+export const DEFAULT_RETENTION_DAYS = 7;
+
+export interface SweepOptions {
+  rootDir?: string;
+  retentionDays?: number;
+  /// Override the cutoff timestamp (tests). Files with mtimeMs < cutoff drop.
+  nowMs?: number;
+}
+
+/// Recursively delete files under the inbox root older than the retention
+/// window, then prune any per-agent dir that ends up empty. Safe to call on
+/// startup and from a setInterval — silently no-ops if the root does not
+/// exist yet (a fresh box has not received any attachment).
+export function sweepInbox(opts: SweepOptions = {}): { removedFiles: number; removedDirs: number } {
+  const root = opts.rootDir ?? inboxRoot();
+  if (!existsSync(root)) return { removedFiles: 0, removedDirs: 0 };
+  const retentionDays = opts.retentionDays ?? DEFAULT_RETENTION_DAYS;
+  if (retentionDays <= 0) return { removedFiles: 0, removedDirs: 0 }; // 0 disables sweep
+  const cutoff = (opts.nowMs ?? Date.now()) - retentionDays * 24 * 60 * 60 * 1000;
+  let removedFiles = 0;
+  let removedDirs = 0;
+
+  let perAgentDirs: string[];
+  try {
+    perAgentDirs = readdirSync(root);
+  } catch {
+    return { removedFiles, removedDirs };
+  }
+  for (const slug of perAgentDirs) {
+    const slugDir = join(root, slug);
+    let entries: string[];
+    try {
+      const s = statSync(slugDir);
+      if (!s.isDirectory()) continue;
+      entries = readdirSync(slugDir);
+    } catch {
+      continue;
+    }
+    for (const name of entries) {
+      const path = join(slugDir, name);
+      try {
+        const st = statSync(path);
+        if (st.isFile() && st.mtimeMs < cutoff) {
+          rmSync(path, { force: true });
+          removedFiles++;
+        }
+      } catch {
+        /* file vanished between readdir and stat; ignore */
+      }
+    }
+    try {
+      if (readdirSync(slugDir).length === 0) {
+        rmdirSync(slugDir);
+        removedDirs++;
+      }
+    } catch {
+      /* dir vanished or not empty; ignore */
+    }
+  }
+  return { removedFiles, removedDirs };
 }
