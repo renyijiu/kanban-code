@@ -10,7 +10,8 @@ import { Runtime } from "../agents/runtime.js";
 import { recordAnnounceSuppress } from "./announce-suppress.js";
 import { writeThreadRoot, readThreadRoot } from "./thread-root.js";
 import { downloadSlackFile, formatPromptWithAttachments, DownloadedFile, sweepInbox, DEFAULT_RETENTION_DAYS } from "./inbox.js";
-import { findSessionJsonl, findCodexRollout, pasteTmuxPrompt } from "../data.js";
+import { parsePicker, Picker } from "./picker.js";
+import { findSessionJsonl, findCodexRollout, pasteTmuxPrompt, captureTmuxPane, sendTmuxKey } from "../data.js";
 
 export interface BridgeOptions {
   botToken: string;
@@ -29,6 +30,53 @@ interface TailState {
   channelId: string;
   path?: string;
   offset: number;
+}
+
+/// Per-claude-agent picker state. Tracks the hash of the most recently posted
+/// picker so the poller does not repost the same picker every tick, and the
+/// Slack message ts so a button click can update the message in place to show
+/// which option was chosen.
+interface PickerState {
+  hash: string;
+  options: { number: number; title: string }[];
+  messageTs: string;
+  channelId: string;
+}
+
+/// Build the Block Kit payload for a picker. Numbered buttons map 1:1 to the
+/// agent's picker; the action_id encodes (slug, hash, number) so the click
+/// handler can route safely even if a stale message is clicked.
+function pickerBlocks(slug: string, picker: Picker): { text: string; blocks: any[] } {
+  const fallback = picker.question || "Claude is asking you to pick an option.";
+  const bullets = picker.options
+    .map((o) => {
+      const head = `*${o.number}.* ${o.title}`;
+      return o.description ? `${head}\n_${o.description}_` : head;
+    })
+    .join("\n\n");
+  const header = picker.question ? `*${picker.question}*\n\n${bullets}` : bullets;
+  return {
+    text: fallback,
+    blocks: [
+      { type: "section", text: { type: "mrkdwn", text: header } },
+      {
+        type: "actions",
+        elements: picker.options.map((o) => ({
+          type: "button",
+          text: { type: "plain_text", text: String(o.number) },
+          value: String(o.number),
+          action_id: `picker:${slug}:${picker.hash}:${o.number}`,
+        })),
+      },
+    ],
+  };
+}
+
+function pickerSelectedBlocks(picker: Picker, choice: number, by: string): { text: string; blocks: any[] } {
+  const chosen = picker.options.find((o) => o.number === choice);
+  const label = chosen ? `${choice}. ${chosen.title}` : String(choice);
+  const text = `${picker.question || "Selected"} — picked: *${label}* by <@${by}>`;
+  return { text, blocks: [{ type: "section", text: { type: "mrkdwn", text } }] };
 }
 
 function readAppendedLines(path: string, offset: number): { objs: any[]; newOffset: number } {
@@ -210,8 +258,98 @@ export async function runSlackBridge(opts: BridgeOptions): Promise<void> {
     }
   }, Math.floor(REFRESH_MS / 2));
 
+  // Picker poller (Claude runtime only). Claude Code renders interactive
+  // numbered pickers in the terminal that never appear in the transcript;
+  // we capture the pane every second, detect the picker, and post one Slack
+  // Block Kit message with N buttons. A click round-trips back via the
+  // interactivity socket as a tmux send-keys of the chosen digit (no Enter
+  // — Claude Code commits on the bare digit). Codex agents are skipped to
+  // avoid send-keys-ing into a session that does not have this UI.
+  const pickerByAgent = new Map<string, PickerState>();
+  const PICKER_POLL_MS = 1000;
+  const claudeAgents = tails.filter((t) => t.runtime === "claude");
+  if (claudeAgents.length) {
+    setInterval(async () => {
+      for (const t of claudeAgents) {
+        const pane = captureTmuxPane(t.slug);
+        if (!pane) continue;
+        const picker = parsePicker(pane);
+        const prev = pickerByAgent.get(t.slug);
+        if (!picker) {
+          // Picker dismissed (agent moved on). Drop our state so the next
+          // picker — even one with the same hash recycled — gets reposted.
+          if (prev) pickerByAgent.delete(t.slug);
+          continue;
+        }
+        if (prev && prev.hash === picker.hash) continue; // already posted
+        const { text, blocks } = pickerBlocks(t.slug, picker);
+        const threadTs = readThreadRoot(t.slug);
+        try {
+          const ts = await client.postBlocks(t.channelId, text, blocks, threadTs);
+          if (ts) {
+            pickerByAgent.set(t.slug, {
+              hash: picker.hash,
+              options: picker.options.map((o) => ({ number: o.number, title: o.title })),
+              messageTs: ts,
+              channelId: t.channelId,
+            });
+          }
+        } catch (e) {
+          console.error(`picker post for ${t.slug} failed:`, e);
+        }
+      }
+    }, PICKER_POLL_MS);
+  }
+
   // slack -> agent
   const socket = new SocketModeClient({ appToken: opts.appToken });
+  // Block Kit button clicks land here over the same socket connection. The
+  // action_id is `picker:<slug>:<hash>:<N>` — we look up the active picker
+  // for that slug, send the digit to its tmux session, and update the Slack
+  // message in place so the channel shows what was picked and by whom.
+  socket.on("interactive", async ({ body, ack }: any) => {
+    if (ack) await ack();
+    const actions = body?.actions ?? [];
+    for (const a of actions) {
+      const id: string = a.action_id ?? "";
+      if (!id.startsWith("picker:")) continue;
+      const [, slug, hash, numStr] = id.split(":");
+      const chosen = parseInt(numStr, 10);
+      const state = pickerByAgent.get(slug);
+      if (!state || state.hash !== hash) {
+        console.error(`picker click for ${slug}#${hash} but state is stale; ignoring`);
+        continue;
+      }
+      const known = state.options.find((o) => o.number === chosen);
+      if (!known) {
+        console.error(`picker click for ${slug} chose ${chosen} but options are ${state.options.map((o) => o.number).join(",")}`);
+        continue;
+      }
+      const res = sendTmuxKey(slug, String(chosen));
+      if (!res.ok) {
+        console.error(`send-key ${chosen} -> ${slug} failed:`, res.error);
+        continue;
+      }
+      // Reconstruct enough of the picker to render the "selected" message;
+      // descriptions are not needed for the resolved view.
+      const fauxPicker: Picker = {
+        question: body?.message?.text ?? "",
+        options: state.options.map((o) => ({ number: o.number, title: o.title })),
+        hash: state.hash,
+      };
+      const who = body?.user?.id ?? "user";
+      const { text, blocks } = pickerSelectedBlocks(fauxPicker, chosen, who);
+      try {
+        await client.update(state.channelId, state.messageTs, text, blocks);
+      } catch (e) {
+        console.error(`picker message update for ${slug} failed:`, e);
+      }
+      // Drop the state so the next picker (with potentially recycled numbers)
+      // posts fresh on the next poll tick.
+      pickerByAgent.delete(slug);
+    }
+  });
+
   socket.on("message", async ({ event, ack }: any) => {
     if (ack) await ack();
     const decision = routeSlackMessage(event, mapping, botUserId);

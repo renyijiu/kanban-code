@@ -67,5 +67,6 @@ describe("slackAppManifest", () => {
     assert.equal(m.settings.event_subscriptions.bot_events.includes("message.channels"), true);
     assert.ok(m.oauth_config.scopes.bot.includes("chat:write"));
     assert.ok(m.oauth_config.scopes.bot.includes("groups:history"));
+    assert.equal(m.settings.interactivity.is_enabled, true, "interactivity for picker buttons");
   });
 });

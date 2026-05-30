@@ -204,6 +204,21 @@ export function pasteTmuxPrompt(
   }
 }
 
+/// Send a single keystroke (e.g. the digit "1") to a tmux session WITHOUT a
+/// trailing Enter. Claude Code's numbered picker accepts a bare digit and
+/// commits the choice immediately, so the Slack bridge uses this for picker
+/// button clicks. The bare-digit-no-Enter behavior is why we cannot reuse
+/// sendTmuxKeys (which always appends Enter).
+export function sendTmuxKey(sessionName: string, key: string): { ok: boolean; error?: string } {
+  const tmux = findTmux();
+  try {
+    execSync(`${tmux} send-keys -t ${shellEscape(sessionName)} ${shellEscape(key)}`, { encoding: "utf-8" });
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, error: String(e) };
+  }
+}
+
 export function scheduleTmuxPrompt(
   sessionName: string,
   text: string,

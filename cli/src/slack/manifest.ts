@@ -48,7 +48,10 @@ export function slackAppManifest(opts: ManifestOptions = {}): string {
       event_subscriptions: {
         bot_events: ["message.channels", "message.groups", "app_mention"],
       },
-      interactivity: { is_enabled: false },
+      // Interactivity is delivered over the same socket connection (no public
+      // request_url needed) so the bridge can receive block_actions events
+      // when a user clicks a button on the picker mirror.
+      interactivity: { is_enabled: true },
       org_deploy_enabled: false,
       socket_mode_enabled: true,
       token_rotation_enabled: false,

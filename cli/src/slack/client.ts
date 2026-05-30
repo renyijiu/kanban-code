@@ -27,6 +27,26 @@ export class SlackClient {
     return r.ts as string | undefined;
   }
 
+  /// Post a Block Kit message (e.g. the picker UI) with fallback text for
+  /// notifications. Returns ts so callers can update or delete it later.
+  async postBlocks(channel: string, text: string, blocks: any[], threadTs?: string): Promise<string | undefined> {
+    const r = await this.web.chat.postMessage({
+      channel,
+      text,
+      blocks,
+      thread_ts: threadTs,
+      unfurl_links: false,
+      unfurl_media: false,
+    });
+    return r.ts as string | undefined;
+  }
+
+  /// Update an existing message in place (used to replace the picker buttons
+  /// with a "selected: N" summary once the user clicks one).
+  async update(channel: string, ts: string, text: string, blocks?: any[]): Promise<void> {
+    await this.web.chat.update({ channel, ts, text, blocks });
+  }
+
   /// Set the "working…" pill on a thread (Slack's Agents & Assistants UI).
   /// An empty status clears the pill explicitly; a normal post in the same
   /// thread also clears it automatically. Slack drops the pill on its own
