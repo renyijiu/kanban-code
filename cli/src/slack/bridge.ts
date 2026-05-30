@@ -130,11 +130,13 @@ export async function runSlackBridge(opts: BridgeOptions): Promise<void> {
         // in the channel as their message).
         if (t.runtime === "codex" && post.role === "user" && consumeRelayEcho(t.slug, post.text)) continue;
         try {
-          if (post.role === "user") {
-            // A received prompt opens a new thread; the agent's work for this
-            // turn replies under it instead of cluttering the channel root.
-            // (Claude's received prompt is posted by the daemon's announce,
-            // which records the same root, so Claude threads too.)
+          // Text posts (user prompts AND assistant text) sit at the channel
+          // root and become the new thread anchor; tool/thinking blocks reply
+          // under that anchor. This keeps the channel readable as a single
+          // back-and-forth while the tool noise lives in the threads.
+          // (Claude's received-prompt path goes through the daemon's announce,
+          // which writes the same thread-root file the bridge reads here.)
+          if (post.kind === "text") {
             const ts = await client.post(t.channelId, post.text);
             if (ts) writeThreadRoot(t.slug, ts);
           } else {
