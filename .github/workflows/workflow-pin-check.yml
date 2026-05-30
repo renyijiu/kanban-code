@@ -1,0 +1,64 @@
+name: Workflow pin check
+
+# Block PRs that introduce an `uses: <action>@<floating-tag>` line in any
+# workflow file. Every third-party action must be pinned to a 40-character
+# commit SHA — version tags can be silently re-pointed by the action owner
+# to malicious code (supply-chain attack vector). The convention is:
+#   - uses: org/action@<40-char-sha>  # vN.M.K (or just vN)
+# so the trailing comment still documents the human-readable version.
+#
+# Local same-repo references (uses: ./.github/actions/foo) are allowed
+# unpinned because they ship from the same repository tree as the workflow.
+
+on:
+  pull_request:
+    paths:
+      - .github/workflows/**
+      - .github/actions/**
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/**
+      - .github/actions/**
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          persist-credentials: false
+
+      - name: Verify every `uses:` is SHA-pinned
+        run: |
+          set -eo pipefail
+          violations=0
+          # grep -E with -H so we get filename:lineno:content. We look at all
+          # uses: lines, then filter to the offenders.
+          while IFS= read -r line; do
+            # Format: <file>:<lineno>:<original-content>
+            file="${line%%:*}"
+            rest="${line#*:}"
+            lineno="${rest%%:*}"
+            content="${rest#*:}"
+            # Extract what comes after "uses:" up to whitespace/end.
+            ref=$(printf '%s' "$content" | sed -E 's/.*uses:[[:space:]]*//; s/[[:space:]].*//')
+            # Allow local references (./...).
+            case "$ref" in
+              ./*) continue ;;
+            esac
+            # Reject if there's no @, or the part after @ is not a 40-hex SHA.
+            after_at="${ref#*@}"
+            if [ "$after_at" = "$ref" ] || ! printf '%s' "$after_at" | grep -Eq '^[0-9a-f]{40}$'; then
+              echo "::error file=$file,line=$lineno::Action not SHA-pinned: $ref (use a 40-char commit SHA, with the version tag in a trailing comment)"
+              violations=$((violations + 1))
+            fi
+          done < <(grep -RHnE '^[[:space:]]*-?[[:space:]]*uses:[[:space:]]' .github/workflows .github/actions 2>/dev/null || true)
+          if [ "$violations" -gt 0 ]; then
+            echo "::error::$violations unpinned action reference(s). Pin to a 40-char commit SHA: \`uses: org/action@<sha>  # vN.M.K\`"
+            exit 1
+          fi
+          echo "All action references are SHA-pinned."

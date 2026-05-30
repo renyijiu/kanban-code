@@ -140,9 +140,6 @@ describe("formatCodexRolloutLines", () => {
     assert.match(posts[2].text, /gh pr view 519/);
     assert.match(posts[2].text, /gh pr diff 519/);
     assert.match(posts[2].text, /gh pr checks 519/);
-    // Pill follows the latest command in the coalesced batch so the channel
-    // shows "now running gh pr checks 519" rather than the first one.
-    assert.match(posts[2].statusLabel ?? "", /gh pr checks 519/);
   });
 
   test("mirrors an out-of-credits failure when a turn produces no output", () => {

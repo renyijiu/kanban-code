@@ -11,10 +11,6 @@ export interface SlackPost {
   /// "thinking" -> a brief thinking-trace excerpt (also lands in the thread).
   kind: "text" | "tool" | "thinking";
   text: string; // Slack mrkdwn
-  /// Short label suitable for the Slack "working…" pill (assistant.threads.
-  /// setStatus). Populated only for tool/thinking posts. Bridge uses it to
-  /// reflect the current activity in the pill (e.g. "🛠️ Bash(view PR)…").
-  statusLabel?: string;
 }
 
 const MAX_TEXT = 2800; // keep individual posts readable / within Slack block limits
@@ -92,14 +88,6 @@ function fenceBlock(label: string): string {
   return "```\n" + label + "\n```";
 }
 
-/// Compose the Slack "working…" pill label for a tool block. Short, prefixed
-/// with a hammer for a visual cue, and capped so a noisy Bash description does
-/// not overflow Slack's status width.
-function statusLabelForTool(label: string): string {
-  const trimmed = label.length > 80 ? label.slice(0, 80) + "…" : label;
-  return `🛠️ ${trimmed}…`;
-}
-
 function role(obj: any): string | undefined {
   return obj?.type ?? obj?.message?.role;
 }
@@ -122,19 +110,14 @@ function emitAssistantBlocks(content: any, out: SlackPost[]): void {
       }
       case "thinking": {
         if (block.thinking?.trim()) {
-          out.push({
-            role: "assistant",
-            kind: "thinking",
-            text: `💭 _${truncate(block.thinking, 280)}_`,
-            statusLabel: "💭 thinking…",
-          });
+          out.push({ role: "assistant", kind: "thinking", text: `💭 _${truncate(block.thinking, 280)}_` });
         }
         break;
       }
       case "tool_use": {
         const label = toolLabel(block.name, block.input ?? {});
         const text = PROSE_TOOLS.has(block.name) ? label : fenceBlock(label);
-        out.push({ role: "assistant", kind: "tool", text, statusLabel: statusLabelForTool(label) });
+        out.push({ role: "assistant", kind: "tool", text });
         break;
       }
       default:
@@ -155,9 +138,6 @@ function coalesceTools(posts: SlackPost[]): SlackPost[] {
     const last = out[out.length - 1];
     if (p.kind === "tool" && last?.kind === "tool" && last.role === p.role) {
       last.text = last.text + "\n" + p.text;
-      // The pill should reflect the LATEST tool in the run, not the first;
-      // a "🛠️ Bash(view checks)…" replaces "🛠️ Bash(view PR)…".
-      if (p.statusLabel) last.statusLabel = p.statusLabel;
     } else {
       out.push({ ...p });
     }
@@ -209,7 +189,6 @@ export function formatCodexRolloutLines(objs: any[]): SlackPost[] {
           role: "assistant",
           kind: "tool",
           text: fenceBlock(`$ ${truncate(cmd, 300)}`),
-          statusLabel: statusLabelForTool(`$ ${truncate(cmd, 60)}`),
         });
       }
     } else if (p.type === "token_count" && p.rate_limits?.credits) {
