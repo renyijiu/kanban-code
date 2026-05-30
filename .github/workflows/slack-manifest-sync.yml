@@ -110,14 +110,29 @@ jobs:
           perms=$(echo "$resp" | jq -r '.permissions_updated // false')
           echo "permissions_updated=$perms" >> "$GITHUB_OUTPUT"
 
-      - name: Warn when reinstall is required (scope change)
+      - name: Notify #agent-box-status when reinstall is required (scope change)
         if: steps.update.outputs.permissions_updated == 'true'
         env:
+          BOT_TOKEN: ${{ secrets.SLACK_AGENTS_NOTIFY_BOT_TOKEN }}
+          # #agent-box-status — hardcoded because the operator surface for box
+          # health lives there. Channel ids are not sensitive (anyone in the
+          # workspace can find them), so this is in code, not a secret.
+          CHANNEL: C0B6JUZL1H8
           APP_ID: ${{ secrets.SLACK_AGENTS_APP_ID }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           # Slack cannot grant new OAuth scopes without a human consent click;
           # the manifest is already applied, the bot just needs reinstall.
           echo "::warning::Manifest applied but new OAuth scopes were added — click \"Reinstall App\" once at https://api.slack.com/apps/${APP_ID}/install-on-team to activate them."
+          if [ -z "$BOT_TOKEN" ]; then
+            echo "SLACK_AGENTS_NOTIFY_BOT_TOKEN unset — skipping Slack ping."
+            exit 0
+          fi
+          text=":warning: Slack app manifest updated for \`${APP_ID}\` and new OAuth scopes were added. Click *Reinstall App* once at <https://api.slack.com/apps/${APP_ID}/install-on-team> to activate them. Run: ${RUN_URL}"
+          curl -sS -X POST "https://slack.com/api/chat.postMessage" \
+            -H "Authorization: Bearer $BOT_TOKEN" \
+            -H "Content-Type: application/json; charset=utf-8" \
+            -d "$(jq -nc --arg ch "$CHANNEL" --arg t "$text" '{channel:$ch,text:$t}')" | jq .
 
       - name: Persist rotated refresh token
         env:
