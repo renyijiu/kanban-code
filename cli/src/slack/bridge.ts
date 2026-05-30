@@ -165,6 +165,31 @@ export async function runSlackBridge(opts: BridgeOptions): Promise<void> {
   interface ActivePill { channelId: string; threadTs: string; label: string; lastSetMs: number; }
   const active = new Map<string /* slug */, ActivePill>();
 
+  // Per-agent buffer of tool/thinking posts that have NOT yet been sent. We
+  // hold them until the next text post arrives (or a picker pops), then drain
+  // them all into the previous text's thread as a single message. This keeps
+  // the channel root showing only the agent's narrative (each text becomes a
+  // top-level post) while the tool noise collapses behind a "1 reply" link.
+  // The pill therefore always rides the latest channel-root text.
+  const buffered = new Map<string /* slug */, string[] /* text bodies */>();
+  const drainBuffer = async (slug: string, channelId: string): Promise<void> => {
+    const buf = buffered.get(slug);
+    if (!buf?.length) return;
+    buffered.delete(slug);
+    const anchor = readThreadRoot(slug);
+    if (!anchor) return; // no prior text to thread under; drop (rare, bridge boot)
+    // Single Slack post per drain — concatenating with a blank line is enough
+    // for the dozens-of-bash-calls case. Slack's per-message text cap is 40k
+    // which is plenty for the typical batch; on overflow Slack drops the
+    // excess and we get a `text too long` error which the catch logs.
+    const text = buf.join("\n");
+    try {
+      await client.post(channelId, text, anchor);
+    } catch (e) {
+      console.error(`drain buffer for ${slug} failed:`, e);
+    }
+  };
+
   // agent -> slack
   setInterval(async () => {
     for (const t of tails) {
@@ -192,50 +217,30 @@ export async function runSlackBridge(opts: BridgeOptions): Promise<void> {
         // in the channel as their message).
         if (t.runtime === "codex" && post.role === "user" && consumeRelayEcho(t.slug, post.text)) continue;
         try {
-          // Text posts (user prompts AND assistant text) sit at the channel
-          // root and become the new thread anchor; tool/thinking blocks reply
-          // under that anchor. This keeps the channel readable as a single
-          // back-and-forth while the tool noise lives in the threads.
-          // (Claude's received-prompt path goes through the daemon's announce,
-          // which writes the same thread-root file the bridge reads here.)
           if (post.kind === "text") {
+            // A text post (user prompt OR assistant narrative) is the natural
+            // beat: first drain the tools that piled up under the PREVIOUS
+            // text into its thread, then post this text as the new channel-
+            // root anchor and move the "working…" pill onto it.
+            await drainBuffer(t.slug, t.channelId);
             const ts = await client.post(t.channelId, post.text);
             if (ts) writeThreadRoot(t.slug, ts);
-            // A text reply auto-clears the "working…" pill in Slack — drop
-            // our refresh state so we do not redundantly keep it alive after
-            // the turn settled.
-            active.delete(t.slug);
-            // For a user prompt (codex user_message lands here), light the
-            // pill immediately so the channel reflects that the agent is
-            // active before its first tool call shows up. Assistant text
-            // posts wrap up a turn, so they do not get a pill.
-            if (post.role === "user" && ts) {
+            active.delete(t.slug); // drained → previous pill auto-clears
+            if (ts) {
               try {
                 await client.setStatus(t.channelId, ts, WORKING_LABEL);
                 active.set(t.slug, { channelId: t.channelId, threadTs: ts, label: WORKING_LABEL, lastSetMs: Date.now() });
               } catch (e) {
-                console.error(`setStatus (prompt) for ${t.slug} failed:`, e);
+                console.error(`setStatus (text) for ${t.slug} failed:`, e);
               }
             }
           } else {
-            const threadTs = readThreadRoot(t.slug);
-            await client.post(t.channelId, post.text, threadTs);
-            // Refresh the pill so the channel keeps showing the agent is
-            // working between text posts. Skip when there is no thread root
-            // to anchor it on.
-            if (threadTs) {
-              try {
-                await client.setStatus(t.channelId, threadTs, WORKING_LABEL);
-                active.set(t.slug, {
-                  channelId: t.channelId,
-                  threadTs,
-                  label: WORKING_LABEL,
-                  lastSetMs: Date.now(),
-                });
-              } catch (e) {
-                console.error(`setStatus for ${t.slug} failed:`, e);
-              }
-            }
+            // Tool / thinking blocks are buffered and only sent on the next
+            // text post. The pill keeps refreshing on the current anchor
+            // without us touching it — that's the existing refresh loop.
+            const buf = buffered.get(t.slug) ?? [];
+            buf.push(post.text);
+            buffered.set(t.slug, buf);
           }
         } catch (e) {
           console.error(`post to ${t.slug} failed:`, e);
@@ -287,9 +292,11 @@ export async function runSlackBridge(opts: BridgeOptions): Promise<void> {
         const { text, blocks } = pickerBlocks(t.slug, picker);
         // Pickers go to the channel root, not into the current thread: they
         // are the agent blocking on YOU, so they need to be where the channel
-        // shows them at a glance. Also becomes the new thread anchor so
-        // subsequent tool calls thread under it cleanly.
+        // shows them at a glance. Drain any pending tool buffer into the
+        // PREVIOUS anchor first so those tools don't get dropped, then the
+        // picker becomes the new thread anchor.
         try {
+          await drainBuffer(t.slug, t.channelId);
           const ts = await client.postBlocks(t.channelId, text, blocks);
           if (ts) {
             writeThreadRoot(t.slug, ts);
