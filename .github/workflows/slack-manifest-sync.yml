@@ -28,15 +28,15 @@ jobs:
       run:
         working-directory: cli
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
 
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@0e279bb959325dab635dd2c09392533439d90093 # v6.0.8
         with:
           version: 10
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
         with:
-          node-version: 22
+          node-version: 24
           cache: pnpm
           cache-dependency-path: cli/pnpm-lock.yaml
 
@@ -56,7 +56,7 @@ jobs:
       - name: Convert manifest YAML to JSON
         run: |
           # apps.manifest.update takes the manifest as a JSON string.
-          # Use the yq Go binary preinstalled on ubuntu-latest runners.
+          # yq Go binary is preinstalled on ubuntu-latest runners.
           yq -o=json eval "$RUNNER_TEMP/manifest.yaml" > "$RUNNER_TEMP/manifest.json"
 
       - name: Rotate Slack config token
@@ -79,7 +79,6 @@ jobs:
           new_refresh=$(echo "$resp" | jq -r .refresh_token)
           echo "::add-mask::$access"
           echo "::add-mask::$new_refresh"
-          # Use environment files so masked values stay masked across steps.
           {
             echo "SLACK_CONFIG_ACCESS_TOKEN=$access"
             echo "SLACK_CONFIG_NEW_REFRESH=$new_refresh"
