@@ -129,34 +129,4 @@ describe("formatTranscriptLines", () => {
     assert.equal(posts.length, 0);
   });
 
-  test("tool and thinking posts carry a short statusLabel for the slack pill", () => {
-    const posts = formatTranscriptLines([
-      asst([{ type: "thinking", thinking: "let me check" }]),
-      asst([{ type: "tool_use", name: "Bash", input: { description: "view PR" } }]),
-      asst([{ type: "tool_use", name: "Read", input: { file_path: "/a/b/c/d.ts" } }]),
-      asst([{ type: "text", text: "Done." }]),
-    ]);
-    // 3 in-thread posts (thinking + 2 tools fold into 1) + 1 root text.
-    assert.equal(posts.length, 3);
-    assert.equal(posts[0].kind, "thinking");
-    assert.equal(posts[0].statusLabel, "💭 thinking…");
-    assert.equal(posts[1].kind, "tool");
-    // After coalescing, the latest tool's label wins so the pill tracks
-    // current activity, not the first one in the batch.
-    assert.equal(posts[1].statusLabel, "🛠️ Read(.../b/c/d.ts)…");
-    assert.equal(posts[2].kind, "text");
-    assert.equal(posts[2].statusLabel, undefined);
-  });
-
-  test("a very long Bash description in the status label is truncated", () => {
-    const desc = "x".repeat(200);
-    const posts = formatTranscriptLines([
-      asst([{ type: "tool_use", name: "Bash", input: { description: desc } }]),
-    ]);
-    // Status width is capped — we do not want the pill to overflow Slack's UI.
-    assert.equal(posts.length, 1);
-    assert.ok((posts[0].statusLabel ?? "").length <= "🛠️ ".length + 80 + 2,
-      `statusLabel too long: ${posts[0].statusLabel}`);
-    assert.match(posts[0].statusLabel ?? "", /^🛠️ Bash\(.*…$/);
-  });
 });

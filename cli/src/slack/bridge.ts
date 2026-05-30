@@ -158,6 +158,10 @@ export async function runSlackBridge(opts: BridgeOptions): Promise<void> {
   // every REFRESH_MS while a turn is open so the TTL does not drop the pill
   // mid-turn during long bash bursts or large diffs.
   const REFRESH_MS = 60_000;
+  /// Single plain label shown for the entire "agent is working" state — no
+  /// tool name, no emoji. Slack's setStatus already shows its own animated
+  /// indicator next to the text.
+  const WORKING_LABEL = "working…";
   interface ActivePill { channelId: string; threadTs: string; label: string; lastSetMs: number; }
   const active = new Map<string /* slug */, ActivePill>();
 
@@ -201,15 +205,14 @@ export async function runSlackBridge(opts: BridgeOptions): Promise<void> {
             // our refresh state so we do not redundantly keep it alive after
             // the turn settled.
             active.delete(t.slug);
-            // For a user prompt (codex user_message lands here), light an
-            // immediate "💭 thinking…" pill so the channel reflects that the
-            // agent has started work before its first tool call shows up.
-            // Assistant text posts wrap up a turn, so they do not get a pill.
+            // For a user prompt (codex user_message lands here), light the
+            // pill immediately so the channel reflects that the agent is
+            // active before its first tool call shows up. Assistant text
+            // posts wrap up a turn, so they do not get a pill.
             if (post.role === "user" && ts) {
-              const label = "💭 thinking…";
               try {
-                await client.setStatus(t.channelId, ts, label);
-                active.set(t.slug, { channelId: t.channelId, threadTs: ts, label, lastSetMs: Date.now() });
+                await client.setStatus(t.channelId, ts, WORKING_LABEL);
+                active.set(t.slug, { channelId: t.channelId, threadTs: ts, label: WORKING_LABEL, lastSetMs: Date.now() });
               } catch (e) {
                 console.error(`setStatus (prompt) for ${t.slug} failed:`, e);
               }
@@ -217,17 +220,16 @@ export async function runSlackBridge(opts: BridgeOptions): Promise<void> {
           } else {
             const threadTs = readThreadRoot(t.slug);
             await client.post(t.channelId, post.text, threadTs);
-            // Light the pill (or refresh it with the latest tool's label) so
-            // the channel shows the agent is still working between text
-            // posts. If we have no thread root yet (no announce or codex
-            // user_message landed), skip — there is nowhere to anchor it.
-            if (threadTs && post.statusLabel) {
+            // Refresh the pill so the channel keeps showing the agent is
+            // working between text posts. Skip when there is no thread root
+            // to anchor it on.
+            if (threadTs) {
               try {
-                await client.setStatus(t.channelId, threadTs, post.statusLabel);
+                await client.setStatus(t.channelId, threadTs, WORKING_LABEL);
                 active.set(t.slug, {
                   channelId: t.channelId,
                   threadTs,
-                  label: post.statusLabel,
+                  label: WORKING_LABEL,
                   lastSetMs: Date.now(),
                 });
               } catch (e) {
