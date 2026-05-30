@@ -103,6 +103,15 @@ export async function runSlackBridge(opts: BridgeOptions): Promise<void> {
     tails.push({ slug: a.slug, runtime, sessionId, cwd, channelId, path, offset: path ? statSync(path).size : 0 });
   }
 
+  // Per-agent active "working…" pill. Set on each tool/thinking post, cleared
+  // implicitly by Slack the moment we post a text reply in the thread (and by
+  // Slack's own 2-minute idle TTL when the agent stalls or crashes). We refresh
+  // every REFRESH_MS while a turn is open so the TTL does not drop the pill
+  // mid-turn during long bash bursts or large diffs.
+  const REFRESH_MS = 60_000;
+  interface ActivePill { channelId: string; threadTs: string; label: string; lastSetMs: number; }
+  const active = new Map<string /* slug */, ActivePill>();
+
   // agent -> slack
   setInterval(async () => {
     for (const t of tails) {
@@ -139,8 +148,43 @@ export async function runSlackBridge(opts: BridgeOptions): Promise<void> {
           if (post.kind === "text") {
             const ts = await client.post(t.channelId, post.text);
             if (ts) writeThreadRoot(t.slug, ts);
+            // A text reply auto-clears the "working…" pill in Slack — drop
+            // our refresh state so we do not redundantly keep it alive after
+            // the turn settled.
+            active.delete(t.slug);
+            // For a user prompt (codex user_message lands here), light an
+            // immediate "💭 thinking…" pill so the channel reflects that the
+            // agent has started work before its first tool call shows up.
+            // Assistant text posts wrap up a turn, so they do not get a pill.
+            if (post.role === "user" && ts) {
+              const label = "💭 thinking…";
+              try {
+                await client.setStatus(t.channelId, ts, label);
+                active.set(t.slug, { channelId: t.channelId, threadTs: ts, label, lastSetMs: Date.now() });
+              } catch (e) {
+                console.error(`setStatus (prompt) for ${t.slug} failed:`, e);
+              }
+            }
           } else {
-            await client.post(t.channelId, post.text, readThreadRoot(t.slug));
+            const threadTs = readThreadRoot(t.slug);
+            await client.post(t.channelId, post.text, threadTs);
+            // Light the pill (or refresh it with the latest tool's label) so
+            // the channel shows the agent is still working between text
+            // posts. If we have no thread root yet (no announce or codex
+            // user_message landed), skip — there is nowhere to anchor it.
+            if (threadTs && post.statusLabel) {
+              try {
+                await client.setStatus(t.channelId, threadTs, post.statusLabel);
+                active.set(t.slug, {
+                  channelId: t.channelId,
+                  threadTs,
+                  label: post.statusLabel,
+                  lastSetMs: Date.now(),
+                });
+              } catch (e) {
+                console.error(`setStatus for ${t.slug} failed:`, e);
+              }
+            }
           }
         } catch (e) {
           console.error(`post to ${t.slug} failed:`, e);
@@ -148,6 +192,22 @@ export async function runSlackBridge(opts: BridgeOptions): Promise<void> {
       }
     }
   }, pollMs);
+
+  // Refresh "working…" pills that Slack would otherwise drop after its
+  // built-in 2-minute idle TTL. We re-set every REFRESH_MS so an agent grinding
+  // through a long bash sequence keeps the channel visibly active.
+  setInterval(async () => {
+    const now = Date.now();
+    for (const [slug, pill] of active) {
+      if (now - pill.lastSetMs < REFRESH_MS) continue;
+      try {
+        await client.setStatus(pill.channelId, pill.threadTs, pill.label);
+        pill.lastSetMs = now;
+      } catch (e) {
+        console.error(`setStatus refresh for ${slug} failed:`, e);
+      }
+    }
+  }, Math.floor(REFRESH_MS / 2));
 
   // slack -> agent
   const socket = new SocketModeClient({ appToken: opts.appToken });
