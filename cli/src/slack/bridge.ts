@@ -8,6 +8,7 @@ import { loadAgentsConfig } from "../agents/config.js";
 import { agentIdentity } from "../agents/identity.js";
 import { Runtime } from "../agents/runtime.js";
 import { recordAnnounceSuppress } from "./announce-suppress.js";
+import { writeThreadRoot, readThreadRoot } from "./thread-root.js";
 import { findSessionJsonl, findCodexRollout, pasteTmuxPrompt } from "../data.js";
 
 export interface BridgeOptions {
@@ -129,7 +130,16 @@ export async function runSlackBridge(opts: BridgeOptions): Promise<void> {
         // in the channel as their message).
         if (t.runtime === "codex" && post.role === "user" && consumeRelayEcho(t.slug, post.text)) continue;
         try {
-          await client.post(t.channelId, post.text);
+          if (post.role === "user") {
+            // A received prompt opens a new thread; the agent's work for this
+            // turn replies under it instead of cluttering the channel root.
+            // (Claude's received prompt is posted by the daemon's announce,
+            // which records the same root, so Claude threads too.)
+            const ts = await client.post(t.channelId, post.text);
+            if (ts) writeThreadRoot(t.slug, ts);
+          } else {
+            await client.post(t.channelId, post.text, readThreadRoot(t.slug));
+          }
         } catch (e) {
           console.error(`post to ${t.slug} failed:`, e);
         }

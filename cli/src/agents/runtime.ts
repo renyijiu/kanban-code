@@ -30,9 +30,10 @@ export interface RuntimeSpec {
   bin: string;
   /// Build the argv after the binary.
   buildArgs(input: BuildArgsInput): string[];
-  /// Whether this runtime can resume a prior session by our session id. Claude
-  /// can (--resume <uuid>); Codex generates its own id and the headless reviewer
-  /// is per-PR, so we always launch it fresh and rely on tmux to keep it alive.
+  /// Whether this runtime can resume a prior session. Claude resumes by our
+  /// stable session id (--resume <uuid>); Codex mints its own id but can resume
+  /// the most recent session for the launch cwd (resume --last), so a box
+  /// restart keeps the agent's context instead of starting from scratch.
   canResume: boolean;
   /// Whether the daemon's context-threshold self-compaction applies. Codex
   /// auto-compacts on its own and exposes no context introspection, so off.
@@ -58,19 +59,28 @@ const claude: RuntimeSpec = {
 
 const codex: RuntimeSpec = {
   bin: "codex",
-  canResume: false,
+  canResume: true,
   selfCompact: false,
   configDirName: ".codex",
-  buildArgs({ skipPermissions, model }) {
+  buildArgs({ resume, skipPermissions, model }) {
     // --no-alt-screen keeps Codex inline so tmux send-keys paste works (no TUI
     // alt-screen). The bypass flags are Codex's equivalent of Claude's
     // --dangerously-skip-permissions; --dangerously-bypass-hook-trust skips the
-    // interactive hook-trust gate so our hooks run unattended.
+    // interactive hook-trust gate so our hooks run unattended. These are global
+    // flags and must come before the `resume` subcommand.
     const args = ["--no-alt-screen"];
     if (skipPermissions) {
       args.push("--dangerously-bypass-approvals-and-sandbox", "--dangerously-bypass-hook-trust");
     }
-    if (model) args.push("-m", model);
+    if (resume) {
+      // Continue the most recent session for the launch cwd. Codex filters
+      // resume candidates by cwd, and each agent runs in its own workspace, so
+      // --last reliably picks this agent's session. The model is whatever the
+      // resumed session already used, so it is not re-passed here.
+      args.push("resume", "--last");
+    } else if (model) {
+      args.push("-m", model);
+    }
     return args;
   },
 };

@@ -3,6 +3,7 @@ import {
   hasTmuxSession,
   createTmuxSession,
   findSessionJsonl,
+  findCodexRollout,
   readLinks,
 } from "../data.js";
 import { upsertCard, isoNow } from "../cards.js";
@@ -48,10 +49,11 @@ const DEFAULT_OVERRIDES: ManualOverrides = {
 /// Idempotently ensure an agent's session is running in tmux and its kanban card
 /// reflects reality. Decides launch vs resume vs no-op:
 ///   - tmux session already alive            -> no-op (never restart a live agent)
-///   - runtime can resume + transcript exists -> resume
+///   - runtime can resume + prior session     -> resume
 ///   - otherwise                              -> fresh launch
-/// Codex mints its own session id and the reviewer is per-PR, so it always
-/// launches fresh (canResume=false); tmux keeps it alive between prompts.
+/// Claude finds its prior session by our stable id (the transcript jsonl);
+/// Codex mints its own id, so its prior session is detected by the newest
+/// rollout under the launch cwd and resumed with `resume --last`.
 export function ensureAgentSession(
   identity: AgentIdentity,
   opts: LaunchOptions
@@ -61,7 +63,11 @@ export function ensureAgentSession(
   const skipPerms = opts.skipPermissions ?? true;
 
   const tmuxAlive = hasTmuxSession(identity.tmuxName);
-  const sessionExists = spec.canResume && !!findSessionJsonl(identity.sessionId);
+  const sessionExists =
+    spec.canResume &&
+    (identity.runtime === "codex"
+      ? !!findCodexRollout(opts.cwd)
+      : !!findSessionJsonl(identity.sessionId));
 
   let action: LaunchAction;
   let command: string | undefined;

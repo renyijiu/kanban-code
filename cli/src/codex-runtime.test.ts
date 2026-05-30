@@ -12,6 +12,7 @@ import { join } from "node:path";
 
 import { runtimeSpec, isRuntime } from "./agents/runtime.js";
 import { formatCodexRolloutLines } from "./slack/format.js";
+import { writeThreadRoot, readThreadRoot } from "./slack/thread-root.js";
 import { parseAgentsConfig } from "./agents/config.js";
 import { agentIdentity } from "./agents/identity.js";
 import { ensureAgentSession } from "./agents/launch.js";
@@ -37,7 +38,7 @@ describe("runtime descriptor", () => {
   test("codex builds inline + full-auto bypass args and never uses session-id", () => {
     const x = runtimeSpec("codex");
     assert.equal(x.bin, "codex");
-    assert.equal(x.canResume, false);
+    assert.equal(x.canResume, true);
     assert.equal(x.selfCompact, false);
     const args = x.buildArgs({ sessionId: "sid", slug: "agent", resume: false, skipPermissions: true, model: "gpt-5.5" });
     assert.deepEqual(args, [
@@ -49,6 +50,43 @@ describe("runtime descriptor", () => {
     ]);
     assert.ok(!args.includes("--session-id"));
     assert.ok(!args.includes("--resume"));
+  });
+
+  test("codex resume keeps the global flags before the subcommand and uses resume --last", () => {
+    const x = runtimeSpec("codex");
+    const args = x.buildArgs({ sessionId: "sid", slug: "agent", resume: true, skipPermissions: true });
+    assert.deepEqual(args, [
+      "--no-alt-screen",
+      "--dangerously-bypass-approvals-and-sandbox",
+      "--dangerously-bypass-hook-trust",
+      "resume",
+      "--last",
+    ]);
+    // The bypass flags must precede the subcommand (they are global, not
+    // resume-subcommand options), and no model is re-passed on resume.
+    assert.ok(args.indexOf("--dangerously-bypass-approvals-and-sandbox") < args.indexOf("resume"));
+    assert.ok(!args.includes("-m"));
+  });
+
+  test("thread root round-trips per slug and shares across the announce/bridge split", () => {
+    const home = mkdtempSync(join(tmpdir(), "kanban-threads-"));
+    const prev = process.env.KANBAN_CODE_HOME;
+    process.env.KANBAN_CODE_HOME = home;
+    try {
+      assert.equal(readThreadRoot("dependabot-scout"), undefined);
+      // daemon announce records the root; bridge reads it for assistant turns
+      writeThreadRoot("dependabot-scout", "1700000000.000100");
+      assert.equal(readThreadRoot("dependabot-scout"), "1700000000.000100");
+      // a new prompt overwrites the root (start of a new thread)
+      writeThreadRoot("dependabot-scout", "1700000999.000200");
+      assert.equal(readThreadRoot("dependabot-scout"), "1700000999.000200");
+      // roots are per-agent
+      assert.equal(readThreadRoot("pr-reviewer"), undefined);
+    } finally {
+      if (prev === undefined) delete process.env.KANBAN_CODE_HOME;
+      else process.env.KANBAN_CODE_HOME = prev;
+      rmSync(home, { recursive: true, force: true });
+    }
   });
 
   test("isRuntime guards the union", () => {
@@ -80,6 +118,41 @@ describe("formatCodexRolloutLines", () => {
     assert.match(posts[2].text, /gh pr view 519/);
     assert.equal(posts[3].text, "No blockers; 2 nits.");
     assert.ok(posts.slice(1).every((p) => p.role === "assistant"));
+  });
+
+  test("mirrors an out-of-credits failure when a turn produces no output", () => {
+    const objs = [
+      { type: "event_msg", payload: { type: "user_message", message: "Please review PR 4288.", images: [] } },
+      { type: "event_msg", payload: { type: "task_started" } },
+      {
+        type: "event_msg",
+        payload: {
+          type: "token_count",
+          rate_limits: { plan_type: "plus", credits: { has_credits: false, balance: "0" } },
+        },
+      },
+      { type: "event_msg", payload: { type: "task_complete", last_agent_message: null } },
+    ];
+    const posts = formatCodexRolloutLines(objs);
+    assert.equal(posts.length, 2);
+    assert.equal(posts[0].role, "user");
+    assert.match(posts[1].text, /out of credits/i);
+    assert.match(posts[1].text, /plan: plus, balance 0/);
+    assert.match(posts[1].text, /chatgpt\.com\/codex\/settings\/usage/);
+  });
+
+  test("does not warn when a turn completes with output", () => {
+    const objs = [
+      {
+        type: "event_msg",
+        payload: { type: "token_count", rate_limits: { plan_type: "plus", credits: { has_credits: true, balance: "5" } } },
+      },
+      { type: "event_msg", payload: { type: "agent_message", message: "Reviewed, LGTM." } },
+      { type: "event_msg", payload: { type: "task_complete", last_agent_message: "Reviewed, LGTM." } },
+    ];
+    const posts = formatCodexRolloutLines(objs);
+    assert.equal(posts.length, 1);
+    assert.equal(posts[0].text, "Reviewed, LGTM.");
   });
 });
 
