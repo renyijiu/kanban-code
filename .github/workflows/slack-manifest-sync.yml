@@ -1,0 +1,143 @@
+name: Slack manifest sync
+
+# Auto-apply manifest changes to the LangWatch Agents Slack app whenever the
+# generator source changes on main, so operators don't have to manually paste
+# the manifest into api.slack.com. Note Slack still requires a human click to
+# reinstall when NEW OAUTH SCOPES are added; this workflow detects that case
+# and posts a notification in the configured channel instead of attempting a
+# (Slack-impossible) silent reauthorization.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - cli/src/slack/manifest.ts
+      - .github/workflows/slack-manifest-sync.yml
+  workflow_dispatch: {}
+
+# Default permissions are read-only; the rotated-refresh-token write is done
+# via a dedicated PAT (SLACK_AGENTS_SECRETS_PAT) because GITHUB_TOKEN cannot
+# update repository Actions secrets.
+permissions:
+  contents: read
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: cli
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: cli/pnpm-lock.yaml
+
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      - name: Build
+        run: pnpm run build
+
+      - name: Render manifest
+        run: |
+          node -e 'import("./dist/slack/manifest.js").then(m => process.stdout.write(m.slackAppManifest()))' \
+            > "$RUNNER_TEMP/manifest.yaml"
+          echo "--- rendered manifest ---"
+          cat "$RUNNER_TEMP/manifest.yaml"
+
+      - name: Convert manifest YAML to JSON
+        run: |
+          # apps.manifest.update takes the manifest as a JSON string.
+          # Use the yq Go binary preinstalled on ubuntu-latest runners.
+          yq -o=json eval "$RUNNER_TEMP/manifest.yaml" > "$RUNNER_TEMP/manifest.json"
+
+      - name: Rotate Slack config token
+        id: rotate
+        env:
+          SLACK_REFRESH: ${{ secrets.SLACK_AGENTS_CONFIG_REFRESH_TOKEN }}
+        run: |
+          if [ -z "$SLACK_REFRESH" ]; then
+            echo "::error::SLACK_AGENTS_CONFIG_REFRESH_TOKEN is not set"; exit 1
+          fi
+          resp=$(curl -sS -X POST "https://slack.com/api/tooling.tokens.rotate" \
+            -d "refresh_token=$SLACK_REFRESH")
+          ok=$(echo "$resp" | jq -r .ok)
+          if [ "$ok" != "true" ]; then
+            echo "::error::tooling.tokens.rotate failed: $(echo "$resp" | jq -r .error)"
+            exit 1
+          fi
+          # ::add-mask:: keeps both new values out of the run log.
+          access=$(echo "$resp" | jq -r .token)
+          new_refresh=$(echo "$resp" | jq -r .refresh_token)
+          echo "::add-mask::$access"
+          echo "::add-mask::$new_refresh"
+          # Use environment files so masked values stay masked across steps.
+          {
+            echo "SLACK_CONFIG_ACCESS_TOKEN=$access"
+            echo "SLACK_CONFIG_NEW_REFRESH=$new_refresh"
+          } >> "$GITHUB_ENV"
+
+      - name: Update Slack app manifest
+        id: update
+        env:
+          ACCESS: ${{ env.SLACK_CONFIG_ACCESS_TOKEN }}
+          APP_ID: ${{ secrets.SLACK_AGENTS_APP_ID }}
+        run: |
+          if [ -z "$APP_ID" ]; then
+            echo "::error::SLACK_AGENTS_APP_ID is not set"; exit 1
+          fi
+          payload=$(jq -nc \
+            --arg app_id "$APP_ID" \
+            --slurpfile manifest "$RUNNER_TEMP/manifest.json" \
+            '{app_id: $app_id, manifest: $manifest[0]}')
+          resp=$(curl -sS -X POST "https://slack.com/api/apps.manifest.update" \
+            -H "Authorization: Bearer $ACCESS" \
+            -H "Content-Type: application/json; charset=utf-8" \
+            -d "$payload")
+          echo "$resp" | jq .
+          ok=$(echo "$resp" | jq -r .ok)
+          if [ "$ok" != "true" ]; then
+            echo "::error::apps.manifest.update failed: $(echo "$resp" | jq -r .error)"
+            exit 1
+          fi
+          perms=$(echo "$resp" | jq -r '.permissions_updated // false')
+          echo "permissions_updated=$perms" >> "$GITHUB_OUTPUT"
+
+      - name: Notify Slack if reinstall required (scope change)
+        if: steps.update.outputs.permissions_updated == 'true'
+        env:
+          BOT_TOKEN: ${{ secrets.SLACK_AGENTS_NOTIFY_BOT_TOKEN }}
+          CHANNEL: ${{ secrets.SLACK_AGENTS_NOTIFY_CHANNEL_ID }}
+          APP_ID: ${{ secrets.SLACK_AGENTS_APP_ID }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          if [ -z "$BOT_TOKEN" ] || [ -z "$CHANNEL" ]; then
+            echo "Reinstall required but notification creds not set; skipping Slack ping."
+            exit 0
+          fi
+          text=":warning: Slack manifest updated for app \`${APP_ID}\` but the change adds new OAuth scopes. Click *Reinstall App* once at <https://api.slack.com/apps/${APP_ID}/install-on-team> to grant them. Run: ${RUN_URL}"
+          curl -sS -X POST "https://slack.com/api/chat.postMessage" \
+            -H "Authorization: Bearer $BOT_TOKEN" \
+            -H "Content-Type: application/json; charset=utf-8" \
+            -d "$(jq -nc --arg ch "$CHANNEL" --arg t "$text" '{channel:$ch,text:$t}')" | jq .
+
+      - name: Persist rotated refresh token
+        env:
+          GH_TOKEN: ${{ secrets.SLACK_AGENTS_SECRETS_PAT }}
+          NEW_REFRESH: ${{ env.SLACK_CONFIG_NEW_REFRESH }}
+        run: |
+          if [ -z "$GH_TOKEN" ]; then
+            echo "::error::SLACK_AGENTS_SECRETS_PAT is not set — cannot rotate refresh token. Next run WILL fail."
+            exit 1
+          fi
+          # gh CLI is preinstalled on ubuntu-latest. Token in env is picked up automatically.
+          printf '%s' "$NEW_REFRESH" | gh secret set SLACK_AGENTS_CONFIG_REFRESH_TOKEN --repo "${{ github.repository }}" --body -
+          echo "Refresh token rotated and persisted."
