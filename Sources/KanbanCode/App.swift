@@ -114,6 +114,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, UNUs
     }
 
     private var terminationReplyPending = false
+    private weak var channelShareController: ChannelShareController?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         // Disable macOS smart substitutions app-wide (smart quotes, dashes, autocorrect).
@@ -211,22 +212,36 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, UNUs
         return false
     }
 
+    func register(channelShareController: ChannelShareController) {
+        self.channelShareController = channelShareController
+    }
+
+    func applicationWillTerminate(_ notification: Notification) {
+        channelShareController?.terminateAllImmediately()
+    }
+
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         guard !terminationReplyPending else { return .terminateLater }
-        terminationReplyPending = true
+        let managedSessions = Self.listManagedTmuxSessionsSync()
+        KanbanCodeLog.info("quit", "Resolved \(managedSessions.count) live managed tmux session(s)")
+        guard !managedSessions.isEmpty else { return .terminateNow }
 
-        // ContentView knows which tmux sessions belong to managed cards. Let
-        // AppKit enter deferred termination before presenting the modal. The
-        // notification handler runs synchronously once this block is dequeued.
+        terminationReplyPending = true
+        KanbanCodeLog.info("quit", "Termination requested; deferring for managed-session confirmation")
+
+        // Enter deferred termination first, then present the application-modal
+        // alert. The quit decision must not depend on SwiftUI view lifetime:
+        // ContentView is already being torn down while AppKit waits here.
         DispatchQueue.main.async { [weak self] in
             guard self?.terminationReplyPending == true else { return }
-            NotificationCenter.default.post(name: .kanbanCodeQuitRequested, object: nil)
+            self?.presentQuitConfirmation(managedSessions: managedSessions)
         }
 
         // Never leave AppKit stuck in its deferred-termination state if the
         // main view is not mounted or an unexpected presentation error occurs.
         DispatchQueue.main.asyncAfter(deadline: .now() + 10) { [weak self] in
             guard self?.terminationReplyPending == true else { return }
+            KanbanCodeLog.info("quit", "Timed out waiting for quit confirmation; cancelling termination")
             self?.replyToTermination(false)
         }
         return .terminateLater
@@ -236,7 +251,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, UNUs
     func replyToTermination(_ shouldTerminate: Bool) {
         guard terminationReplyPending else { return }
         terminationReplyPending = false
+        KanbanCodeLog.info("quit", "Replying to termination: \(shouldTerminate)")
         NSApp.reply(toApplicationShouldTerminate: shouldTerminate)
+    }
+
+    @MainActor
+    private func presentQuitConfirmation(managedSessions: [TmuxSession]) {
+        switch Self.confirmQuit(
+            managedSessionCount: managedSessions.count,
+            killManagedSessions: UserDefaults.standard.bool(forKey: "killTmuxOnQuit")
+        ) {
+        case .cancel:
+            replyToTermination(false)
+        case .quit(let shouldKill):
+            UserDefaults.standard.set(shouldKill, forKey: "killTmuxOnQuit")
+            if shouldKill {
+                let sessionNames = Set(managedSessions.map(\.name))
+                for sessionName in sessionNames {
+                    Self.killTmuxSessionSync(name: sessionName)
+                }
+                CoordinationStore.clearTmuxSessionsSnapshot(sessionNames)
+            }
+            replyToTermination(true)
+        }
     }
 
     @MainActor
@@ -256,8 +293,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, UNUs
         checkbox.state = killManagedSessions ? .on : .off
         alert.accessoryView = checkbox
 
-        // A SwiftUI sheet can end up attached behind another sheet or drawer.
-        // Use an application-modal alert so the quit decision is always visible.
         NSApp.activate(ignoringOtherApps: true)
         alert.window.level = .modalPanel
         guard alert.runModal() == .alertFirstButtonReturn else { return .cancel }
@@ -288,6 +323,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, UNUs
             guard parts.count >= 3 else { return nil }
             return TmuxSession(name: parts[0], path: parts[1], attached: parts[2] == "1")
         }
+    }
+
+    static func listManagedTmuxSessionsSync() -> [TmuxSession] {
+        let managedNames = Set(
+            CoordinationStore.readLinksSnapshot()
+                .flatMap { $0.tmuxLink?.allSessionNames ?? [] }
+        )
+        guard !managedNames.isEmpty else { return [] }
+        return listAllTmuxSessionsSync()
+            .filter { managedNames.contains($0.name) }
+            .sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
     }
 
     static func killTmuxSessionSync(name: String) {
@@ -440,7 +486,6 @@ extension Notification.Name {
     static let kanbanCodeHistoryChanged = Notification.Name("kanbanCodeHistoryChanged")
     static let kanbanCodeSettingsChanged = Notification.Name("kanbanCodeSettingsChanged")
     static let kanbanCodeSelectCard = Notification.Name("kanbanCodeSelectCard")
-    static let kanbanCodeQuitRequested = Notification.Name("kanbanCodeQuitRequested")
     static let kanbanCodePromptFocusChanged = Notification.Name("kanbanCodePromptFocusChanged")
     static let kanbanSelectTerminalTab = Notification.Name("kanbanSelectTerminalTab")
     static let kanbanCloseTerminalTab = Notification.Name("kanbanCloseTerminalTab")

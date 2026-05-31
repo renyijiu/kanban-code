@@ -23,6 +23,68 @@ public actor CoordinationStore {
 
     // MARK: - Public API
 
+    /// Read a best-effort snapshot without entering the actor.
+    ///
+    /// App termination cannot depend on scheduling an async actor hop: AppKit
+    /// is already waiting for a synchronous termination decision. The regular
+    /// actor-isolated API remains the source of truth for normal reads/writes.
+    public static func readLinksSnapshot(basePath: String? = nil) -> [Link] {
+        let base = basePath ?? (NSHomeDirectory() as NSString).appendingPathComponent(".kanban-code")
+        let filePath = (base as NSString).appendingPathComponent("links.json")
+        guard let data = try? Data(contentsOf: URL(fileURLWithPath: filePath)) else { return [] }
+
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        return (try? decoder.decode(LinksContainer.self, from: data).links) ?? []
+    }
+
+    /// Clear killed tmux associations synchronously during app termination.
+    ///
+    /// Normal mutations must use the actor-isolated APIs. This narrow fallback
+    /// exists because AppKit termination cannot wait for an async actor task.
+    public static func clearTmuxSessionsSnapshot(
+        _ sessionNames: Set<String>,
+        basePath: String? = nil
+    ) {
+        guard !sessionNames.isEmpty else { return }
+        let base = basePath ?? (NSHomeDirectory() as NSString).appendingPathComponent(".kanban-code")
+        let filePath = (base as NSString).appendingPathComponent("links.json")
+        var links = readLinksSnapshot(basePath: base)
+        var changed = false
+
+        for index in links.indices {
+            guard var tmux = links[index].tmuxLink else { continue }
+            let remaining = tmux.allSessionNames.filter { !sessionNames.contains($0) }
+            guard remaining.count != tmux.allSessionNames.count else { continue }
+
+            changed = true
+            guard let primary = remaining.first else {
+                links[index].tmuxLink = nil
+                continue
+            }
+
+            tmux.sessionName = primary
+            let extras = Array(remaining.dropFirst())
+            tmux.extraSessions = extras.isEmpty ? nil : extras
+            tmux.tabNames = tmux.tabNames?.filter { remaining.contains($0.key) }
+            tmux.isPrimaryDead = nil
+            links[index].tmuxLink = tmux
+        }
+        guard changed else { return }
+
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        encoder.dateEncodingStrategy = .iso8601
+        guard let data = try? encoder.encode(LinksContainer(links: links)) else { return }
+
+        let tmpPath = filePath + ".tmp"
+        guard (try? FileManager.default.createDirectory(atPath: base, withIntermediateDirectories: true)) != nil,
+              (try? data.write(to: URL(fileURLWithPath: tmpPath))) != nil
+        else { return }
+        _ = try? FileManager.default.removeItem(atPath: filePath)
+        try? FileManager.default.moveItem(atPath: tmpPath, toPath: filePath)
+    }
+
     /// Read all links from the coordination file.
     public func readLinks() throws -> [Link] {
         let container = try readContainer()

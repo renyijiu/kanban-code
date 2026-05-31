@@ -1171,6 +1171,7 @@ struct ContentView: View {
     private var boardWithHandlers: some View {
         boardWithAlerts
             .task {
+                (NSApp.delegate as? AppDelegate)?.register(channelShareController: shareController)
                 // Show onboarding wizard on first launch
                 if let settings = try? await settingsStore.read(), !settings.hasCompletedOnboarding {
                     showOnboarding = true
@@ -1314,9 +1315,6 @@ struct ContentView: View {
                         updateRegisteredAssistants(settings.enabledAssistants)
                     }
                 }
-            }
-            .onReceive(NotificationCenter.default.publisher(for: .kanbanCodeQuitRequested)) { _ in
-                handleQuitRequest()
             }
             .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification).receive(on: RunLoop.main)) { _ in
                 store.appIsActive = true
@@ -2049,53 +2047,6 @@ struct ContentView: View {
         return .notRunning
     }
 
-    // MARK: - Quit Confirmation
-
-    private func handleQuitRequest() {
-        guard let appDelegate = NSApp.delegate as? AppDelegate else {
-            NSApp.reply(toApplicationShouldTerminate: true)
-            return
-        }
-
-        // Tear down any active channel shares first. They are the only child
-        // processes we own that survive an unclean exit.
-        Task { await shareController.stopAll() }
-
-        let managedSessions = store.state.cards.flatMap { card -> [TmuxSession] in
-            guard let tmux = card.link.tmuxLink else { return [] }
-            return tmux.allSessionNames.map {
-                TmuxSession(name: $0, path: card.link.projectPath ?? "")
-            }
-        }
-        guard !managedSessions.isEmpty else {
-            appDelegate.replyToTermination(true)
-            return
-        }
-
-        switch AppDelegate.confirmQuit(
-            managedSessionCount: Set(managedSessions.map(\.name)).count,
-            killManagedSessions: killTmuxOnQuit
-        ) {
-        case .cancel:
-            appDelegate.replyToTermination(false)
-        case .quit(let shouldKill):
-            killTmuxOnQuit = shouldKill
-            guard shouldKill else {
-                appDelegate.replyToTermination(true)
-                return
-            }
-            let cards = store.state.cards
-            Task {
-                for card in cards {
-                    guard let tmux = card.link.tmuxLink else { continue }
-                    for sessionName in tmux.allSessionNames {
-                        await store.dispatchAndWait(.killTerminal(cardId: card.id, sessionName: sessionName))
-                    }
-                }
-                appDelegate.replyToTermination(true)
-            }
-        }
-    }
     /// Find the card that should be selected after deleting the given card.
     /// Prefers the card directly below; if last in column, selects the one above.
     private func cardIdAfterDeletion(_ cardId: String) -> String? {

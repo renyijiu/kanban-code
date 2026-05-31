@@ -44,6 +44,45 @@ struct CoordinationStoreTests {
         #expect(read[0].name == "Test session")
     }
 
+    @Test("Synchronous snapshot retains tmux links for quit-time fallback")
+    func synchronousSnapshotRetainsTmuxLinks() async throws {
+        let dir = try makeTempDir()
+        defer { cleanup(dir) }
+        let store = CoordinationStore(basePath: dir)
+
+        let link = Link(
+            name: "Managed session",
+            projectPath: "/test/project",
+            tmuxLink: TmuxLink(sessionName: "claude-managed")
+        )
+        try await store.writeLinks([link])
+
+        let snapshot = CoordinationStore.readLinksSnapshot(basePath: dir)
+        #expect(snapshot.count == 1)
+        #expect(snapshot[0].tmuxLink?.sessionName == "claude-managed")
+    }
+
+    @Test("Synchronous quit cleanup removes only killed tmux links")
+    func synchronousSnapshotClearsKilledTmuxLinks() async throws {
+        let dir = try makeTempDir()
+        defer { cleanup(dir) }
+        let store = CoordinationStore(basePath: dir)
+
+        try await store.writeLinks([
+            Link(
+                name: "Managed session",
+                tmuxLink: TmuxLink(sessionName: "claude-primary", extraSessions: ["shell-keep", "shell-kill"])
+            ),
+        ])
+
+        CoordinationStore.clearTmuxSessionsSnapshot(["claude-primary", "shell-kill"], basePath: dir)
+
+        let snapshot = CoordinationStore.readLinksSnapshot(basePath: dir)
+        #expect(snapshot.count == 1)
+        #expect(snapshot[0].tmuxLink?.sessionName == "shell-keep")
+        #expect(snapshot[0].tmuxLink?.extraSessions == nil)
+    }
+
     @Test("Upsert creates new link")
     func upsertNew() async throws {
         let dir = try makeTempDir()

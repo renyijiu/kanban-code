@@ -145,6 +145,19 @@ final class ChannelShareController {
         }
     }
 
+    /// Best-effort synchronous shutdown for `applicationWillTerminate`.
+    ///
+    /// App termination cannot wait for the normal async two-second grace
+    /// period, but SIGTERM still gives the share CLI a chance to clean up its
+    /// cloudflared child process.
+    func terminateAllImmediately() {
+        for process in processes.values where process.isRunning {
+            process.terminate()
+        }
+        processes.removeAll()
+        phases.removeAll()
+    }
+
     /// Remaining time for a channel's share (0 if none or expired).
     func remaining(for channel: String) -> TimeInterval {
         guard case .active(let s) = phases[channel] else { return 0 }
