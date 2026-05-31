@@ -1315,7 +1315,7 @@ struct ContentView: View {
                     }
                 }
             }
-            .onReceive(NotificationCenter.default.publisher(for: .kanbanCodeQuitRequested).receive(on: RunLoop.main)) { _ in
+            .onReceive(NotificationCenter.default.publisher(for: .kanbanCodeQuitRequested)) { _ in
                 handleQuitRequest()
             }
             .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification).receive(on: RunLoop.main)) { _ in

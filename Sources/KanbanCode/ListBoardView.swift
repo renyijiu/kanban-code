@@ -716,12 +716,6 @@ private struct ListCardRowView: View {
             VStack(alignment: .leading, spacing: 3) {
                 // Row 1: title + badge + time
                 HStack(alignment: .firstTextBaseline, spacing: 8) {
-                    if card.link.isPinned {
-                        Image(systemName: "pin.fill")
-                            .font(.app(.caption2))
-                            .foregroundStyle(.secondary)
-                    }
-
                     Text(card.displayTitle)
                         .font(.app(.subheadline))
                         .foregroundStyle(.primary)

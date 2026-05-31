@@ -215,9 +215,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, UNUs
         guard !terminationReplyPending else { return .terminateLater }
         terminationReplyPending = true
 
-        // ContentView knows which tmux sessions belong to managed cards. It
-        // replies after presenting an app-modal confirmation when needed.
-        NotificationCenter.default.post(name: .kanbanCodeQuitRequested, object: nil)
+        // ContentView knows which tmux sessions belong to managed cards. Let
+        // AppKit enter deferred termination before presenting the modal. The
+        // notification handler runs synchronously once this block is dequeued.
+        DispatchQueue.main.async { [weak self] in
+            guard self?.terminationReplyPending == true else { return }
+            NotificationCenter.default.post(name: .kanbanCodeQuitRequested, object: nil)
+        }
 
         // Never leave AppKit stuck in its deferred-termination state if the
         // main view is not mounted or an unexpected presentation error occurs.

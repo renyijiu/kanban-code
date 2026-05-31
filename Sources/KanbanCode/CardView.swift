@@ -28,11 +28,6 @@ struct CardView: View {
         VStack(alignment: .leading, spacing: 6) {
             // Title
             HStack(spacing: 5) {
-                if card.link.isPinned {
-                    Image(systemName: "pin.fill")
-                        .font(.app(.caption))
-                        .foregroundStyle(.secondary)
-                }
                 Text(card.displayTitle)
                     .font(.app(.body, weight: .medium))
                     .lineLimit(2)
