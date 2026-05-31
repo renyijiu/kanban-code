@@ -379,7 +379,7 @@ struct ChannelChatView: View {
     @FocusState private var inputFocused: Bool
     @FocusState private var isSearchFieldFocused: Bool
 
-    private static let retainedScrollbackLimit = 120
+    private static let retainedScrollbackLimit = 500
     private static let searchPageSize = 500
 
     private var displayedMessages: [ChannelMessage] {
@@ -759,7 +759,7 @@ struct ChannelChatView: View {
         ScrollViewReader { proxy in
             ZStack(alignment: .bottom) {
                 ScrollView {
-                    VStack(alignment: .leading, spacing: 2) {
+                    LazyVStack(alignment: .leading, spacing: 2) {
                         if !hasRealMessages { emptyState }
                         ForEach(displayedMessages) { m in
                             messageRow(m, mine: isMine(m))
@@ -793,7 +793,9 @@ struct ChannelChatView: View {
                     let latestChanged = old.last?.id != new.last?.id
                     syncDisplayedMessages(preserveExisting: !isNearBottom)
                     if isNearBottom {
-                        proxy.scrollTo("__bottom__", anchor: .bottom)
+                        withAnimation(.easeOut(duration: 0.15)) {
+                            proxy.scrollTo("__bottom__", anchor: .bottom)
+                        }
                     } else if latestChanged {
                         unseenNewCount += max(1, new.count - old.count)
                     }
@@ -805,7 +807,9 @@ struct ChannelChatView: View {
                 .onChange(of: activelyWorkingMemberIds) { old, new in
                     let newlyWorking = Set(new).subtracting(Set(old))
                     if !newlyWorking.isEmpty && isNearBottom {
-                        proxy.scrollTo("__bottom__", anchor: .bottom)
+                        withAnimation(.easeOut(duration: 0.15)) {
+                            proxy.scrollTo("__bottom__", anchor: .bottom)
+                        }
                     }
                 }
                 .onChange(of: currentMatchPosition) {
@@ -825,7 +829,9 @@ struct ChannelChatView: View {
                 if unseenNewCount > 0 {
                     Button {
                         unseenNewCount = 0
-                        proxy.scrollTo("__bottom__", anchor: .bottom)
+                        withAnimation(.easeOut(duration: 0.2)) {
+                            proxy.scrollTo("__bottom__", anchor: .bottom)
+                        }
                     } label: {
                         HStack(spacing: 6) {
                             Image(systemName: "arrow.down")
@@ -1194,7 +1200,9 @@ struct ChannelChatView: View {
                 preserving: id
             )
         }
-        proxy.scrollTo(id, anchor: .center)
+        withAnimation(.easeInOut(duration: 0.2)) {
+            proxy.scrollTo(id, anchor: .center)
+        }
         Task { @MainActor in
             try? await Task.sleep(for: .milliseconds(16))
             proxy.scrollTo(id, anchor: .center)
@@ -1484,7 +1492,7 @@ struct DMChatView: View {
     @State private var draftCommitTask: Task<Void, Never>?
     @FocusState private var inputFocused: Bool
 
-    private static let retainedScrollbackLimit = 120
+    private static let retainedScrollbackLimit = 500
 
     private var displayedMessages: [ChannelMessage] {
         retainedMessages.isEmpty ? Self.cappedMessages(messages) : retainedMessages
@@ -1556,7 +1564,7 @@ struct DMChatView: View {
         ScrollViewReader { proxy in
             ZStack(alignment: .bottom) {
                 ScrollView {
-                    VStack(alignment: .leading, spacing: 2) {
+                    LazyVStack(alignment: .leading, spacing: 2) {
                         if displayedMessages.isEmpty {
                             Text("No messages yet. Say hello.")
                                 .font(.app(.caption))
@@ -1626,7 +1634,9 @@ struct DMChatView: View {
                     let latestChanged = old.last?.id != new.last?.id
                     syncDisplayedMessages(preserveExisting: !isNearBottom)
                     if isNearBottom {
-                        proxy.scrollTo("__dm_bottom__", anchor: .bottom)
+                        withAnimation(.easeOut(duration: 0.15)) {
+                            proxy.scrollTo("__dm_bottom__", anchor: .bottom)
+                        }
                     } else if latestChanged {
                         unseenNewCount += max(1, new.count - old.count)
                     }
@@ -1642,7 +1652,9 @@ struct DMChatView: View {
                 if unseenNewCount > 0 {
                     Button {
                         unseenNewCount = 0
-                        proxy.scrollTo("__dm_bottom__", anchor: .bottom)
+                        withAnimation(.easeOut(duration: 0.2)) {
+                            proxy.scrollTo("__dm_bottom__", anchor: .bottom)
+                        }
                     } label: {
                         HStack(spacing: 6) {
                             Image(systemName: "arrow.down")

@@ -977,16 +977,12 @@ public enum Reducer {
 
         case .dmMessagesLoaded(let other, let messages):
             let key = Self.dmKey(other)
-            let existingMessages = state.dmMessages[key]
-            let isFirstLoad = existingMessages == nil
-            if !isFirstLoad, messages.isEmpty, existingMessages?.isEmpty == false {
+            let isFirstLoad = state.dmMessages[key] == nil
+            if !isFirstLoad, messages.isEmpty, state.dmMessages[key]?.isEmpty == false {
                 KanbanCodeLog.warn("channels", "Ignoring empty DM reload for @\(other.handle); preserving existing messages")
                 return []
             }
-            let messagesChanged = existingMessages != messages
-            if messagesChanged {
-                state.dmMessages[key] = messages
-            }
+            state.dmMessages[key] = messages
             var effects: [Effect] = []
 
             // Seed lastRead to the latest id on first-ever load so we don't
@@ -997,8 +993,7 @@ public enum Reducer {
                 effects.append(Self.persistReadState(state))
             }
 
-            if messagesChanged,
-               !isFirstLoad,
+            if !isFirstLoad,
                !state.appIsFrontmost,
                let latest = messages.last(where: { $0.type == .message }),
                latest.id != state.dmLastSeenMessageId[key],
