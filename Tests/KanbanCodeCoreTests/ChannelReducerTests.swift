@@ -37,6 +37,34 @@ struct ChannelReducerTests {
         #expect(Set(loaded) == Set(["alpha", "beta"]))
     }
 
+    @Test func channelsLoadedPrefersManualOrder() {
+        var state = AppState()
+        let a = Channel(id: "ch_a", name: "alpha", createdAt: Date(timeIntervalSince1970: 100), createdBy: ChannelParticipant(cardId: nil, handle: "u"), sortOrder: 1)
+        let b = Channel(id: "ch_b", name: "beta", createdAt: Date(timeIntervalSince1970: 200), createdBy: ChannelParticipant(cardId: nil, handle: "u"), sortOrder: 0)
+
+        _ = Reducer.reduce(state: &state, action: .channelsLoaded(channels: [a, b]))
+
+        #expect(state.channels.map(\.name) == ["beta", "alpha"])
+    }
+
+    @Test func reorderChannelPersistsOrderedMetadata() {
+        var state = AppState()
+        state.channels = [
+            Channel(id: "ch_a", name: "alpha", createdAt: Date(timeIntervalSince1970: 100), createdBy: ChannelParticipant(cardId: nil, handle: "u")),
+            Channel(id: "ch_b", name: "beta", createdAt: Date(timeIntervalSince1970: 200), createdBy: ChannelParticipant(cardId: nil, handle: "u")),
+            Channel(id: "ch_c", name: "charlie", createdAt: Date(timeIntervalSince1970: 300), createdBy: ChannelParticipant(cardId: nil, handle: "u")),
+        ]
+
+        let effects = Reducer.reduce(
+            state: &state,
+            action: .reorderChannel(channelId: "ch_c", targetChannelId: "ch_a", above: true)
+        )
+
+        #expect(state.channels.map(\.name) == ["charlie", "alpha", "beta"])
+        #expect(state.channels.map(\.sortOrder) == [0, 1, 2])
+        #expect(effects.contains { if case .persistChannels = $0 { return true }; return false })
+    }
+
     @Test func channelsLoadedDoesNotReloadAlreadyLoadedMessageTails() {
         var state = AppState()
         let alpha = Channel(id: "ch_a", name: "alpha", createdAt: Date(timeIntervalSince1970: 100), createdBy: ChannelParticipant(cardId: nil, handle: "u"), members: [])

@@ -39,6 +39,8 @@ export interface Channel {
   createdAt: string;
   createdBy: { cardId: string | null; handle: string };
   members: Member[];
+  /** Optional app-managed sidebar order. Older CLI versions safely preserve it. */
+  sortOrder?: number;
 }
 
 export interface ChannelMessage {

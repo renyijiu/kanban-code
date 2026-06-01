@@ -181,7 +181,7 @@ struct LinkAssistantCodableTests {
     @Test("Link with pinnedAt round-trips through JSON")
     func linkPinnedAtRoundTrip() throws {
         let pinnedAt = Date(timeIntervalSince1970: 1_700_000_000)
-        let link = Link(id: "card_pin1", pinnedAt: pinnedAt)
+        let link = Link(id: "card_pin1", pinnedAt: pinnedAt, pinnedSortOrder: 4)
         let encoder = JSONEncoder()
         encoder.dateEncodingStrategy = .secondsSince1970
         let data = try encoder.encode(link)
@@ -189,6 +189,7 @@ struct LinkAssistantCodableTests {
         decoder.dateDecodingStrategy = .secondsSince1970
         let decoded = try decoder.decode(Link.self, from: data)
         #expect(decoded.pinnedAt == pinnedAt)
+        #expect(decoded.pinnedSortOrder == 4)
         #expect(decoded.isPinned)
     }
 
@@ -208,6 +209,7 @@ struct LinkAssistantCodableTests {
         decoder.dateDecodingStrategy = .secondsSince1970
         let decoded = try decoder.decode(Link.self, from: json.data(using: .utf8)!)
         #expect(decoded.pinnedAt == nil)
+        #expect(decoded.pinnedSortOrder == nil)
         #expect(!decoded.isPinned)
     }
 

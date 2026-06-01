@@ -25,6 +25,21 @@ struct ChannelsStoreTests {
         #expect(loaded[0].name == "general")
     }
 
+    @Test func channelSortOrderRoundTrips() async throws {
+        let base = tmpBase()
+        defer { try? FileManager.default.removeItem(atPath: base) }
+        let store = ChannelsStore(baseDir: base)
+        let by = ChannelParticipant(cardId: nil, handle: "user")
+        try await store.saveChannels([
+            Channel(id: "ch_a", name: "alpha", createdAt: .now, createdBy: by, sortOrder: 1),
+            Channel(id: "ch_b", name: "beta", createdAt: .now, createdBy: by, sortOrder: 0),
+        ])
+
+        let loaded = await store.loadChannels()
+
+        #expect(loaded.map(\.sortOrder) == [1, 0])
+    }
+
     @Test func joinAppendsEvent() async throws {
         let base = tmpBase()
         defer { try? FileManager.default.removeItem(atPath: base) }

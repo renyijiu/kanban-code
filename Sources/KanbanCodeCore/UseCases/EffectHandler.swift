@@ -186,6 +186,13 @@ public actor EffectHandler {
                 await dispatch(.setError("Failed to create channel: \(error.localizedDescription)"))
             }
 
+        case .persistChannels(let channels):
+            do {
+                try await channelsStore.saveChannels(channels)
+            } catch {
+                KanbanCodeLog.warn("effect", "persistChannels failed: \(error)")
+            }
+
         case .deleteChannelOnDisk(let name):
             do {
                 try await channelsStore.deleteChannel(name: name)

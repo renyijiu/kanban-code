@@ -316,6 +316,31 @@ struct ReducerTests {
 
         #expect(state.links["card_pin2"]?.manuallyArchived == true)
         #expect(state.links["card_pin2"]?.isPinned == false)
+        #expect(state.links["card_pin2"]?.pinnedSortOrder == nil)
+    }
+
+    @Test("reorderPinnedCard changes pin order without changing lane order")
+    func reorderPinnedCardPreservesLaneOrder() {
+        var first = makeLink(id: "card_pin_first", column: .waiting)
+        first.sortOrder = 10
+        first.pinnedAt = Date(timeIntervalSince1970: 100)
+        first.pinnedSortOrder = 0
+        var second = makeLink(id: "card_pin_second", column: .waiting)
+        second.sortOrder = 20
+        second.pinnedAt = Date(timeIntervalSince1970: 200)
+        second.pinnedSortOrder = 1
+        var state = stateWith([first, second])
+
+        let effects = Reducer.reduce(
+            state: &state,
+            action: .reorderPinnedCard(cardId: "card_pin_second", targetCardId: "card_pin_first", above: true)
+        )
+        state.rebuildCards()
+
+        #expect(state.pinnedCards.map(\.id) == ["card_pin_second", "card_pin_first"])
+        #expect(state.links["card_pin_first"]?.sortOrder == 10)
+        #expect(state.links["card_pin_second"]?.sortOrder == 20)
+        #expect(effects.count == 2)
     }
 
     // MARK: - Unlink

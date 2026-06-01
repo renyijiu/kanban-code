@@ -243,7 +243,16 @@ public final class AppState: @unchecked Sendable {
         if newFiltered != filteredCards { filteredCards = newFiltered }
 
         let newPinned = newFiltered.filter(\.link.isPinned).sorted {
-            ($0.link.pinnedAt ?? .distantPast) > ($1.link.pinnedAt ?? .distantPast)
+            switch ($0.link.pinnedSortOrder, $1.link.pinnedSortOrder) {
+            case (let a?, let b?) where a != b: return a < b
+            case (_?, nil): return true
+            case (nil, _?): return false
+            default:
+                let a = $0.link.pinnedAt ?? .distantPast
+                let b = $1.link.pinnedAt ?? .distantPast
+                if a != b { return a > b }
+                return $0.id < $1.id
+            }
         }
         if newPinned != pinnedCards { pinnedCards = newPinned }
 
@@ -371,6 +380,7 @@ public enum Action: Sendable {
     case mergeCards(sourceId: String, targetId: String)
     case updatePrompt(cardId: String, body: String, imagePaths: [String]?)
     case reorderCard(cardId: String, targetCardId: String, above: Bool)
+    case reorderPinnedCard(cardId: String, targetCardId: String?, above: Bool)
 
     // Queued prompts
     case addQueuedPrompt(cardId: String, prompt: QueuedPrompt)
@@ -426,6 +436,7 @@ public enum Action: Sendable {
     case channelMessagesLoaded(channelName: String, messages: [ChannelMessage])
     case selectChannel(name: String?)
     case createChannel(name: String)
+    case reorderChannel(channelId: String, targetChannelId: String?, above: Bool)
     case sendChannelMessage(channelName: String, body: String, imagePaths: [String] = [])
     case channelMessageAppended(channelName: String, message: ChannelMessage)
     case markChannelRead(name: String)
@@ -510,6 +521,7 @@ public enum Effect: Sendable {
     case loadChannels
     case loadChannelMessages(channelName: String)
     case createChannelOnDisk(name: String, by: ChannelParticipant)
+    case persistChannels([Channel])
     case sendChannelMessageToDisk(channelName: String, from: ChannelParticipant, body: String, imagePaths: [String], memberTargets: [ChannelMemberTarget])
     case loadChannelReadState
     case persistChannelReadState(channels: [String: String], dms: [String: String])
@@ -683,6 +695,7 @@ public enum Reducer {
             if column == .allSessions {
                 link.manuallyArchived = true
                 link.pinnedAt = nil
+                link.pinnedSortOrder = nil
             } else if link.manuallyArchived {
                 link.manuallyArchived = false
             }
@@ -734,13 +747,36 @@ public enum Reducer {
             if isPinned {
                 if link.pinnedAt != nil { return [] }
                 link.pinnedAt = .now
+                let firstOrder = state.pinnedCards.compactMap(\.link.pinnedSortOrder).min() ?? 0
+                link.pinnedSortOrder = firstOrder - 1
             } else {
                 if link.pinnedAt == nil { return [] }
                 link.pinnedAt = nil
+                link.pinnedSortOrder = nil
             }
             link.updatedAt = .now
             state.links[cardId] = link
             return [.upsertLink(link)]
+
+        case .reorderPinnedCard(let cardId, let targetCardId, let above):
+            guard state.links[cardId]?.isPinned == true,
+                  let draggedCard = state.pinnedCards.first(where: { $0.id == cardId })
+            else { return [] }
+            var cards = state.pinnedCards.filter { $0.id != cardId }
+            let insertIndex: Int
+            if let targetCardId,
+               let targetIndex = cards.firstIndex(where: { $0.id == targetCardId }) {
+                insertIndex = above ? targetIndex : targetIndex + 1
+            } else {
+                insertIndex = cards.count
+            }
+            cards.insert(draggedCard, at: insertIndex)
+            return cards.enumerated().compactMap { index, card in
+                guard var link = state.links[card.id] else { return nil }
+                link.pinnedSortOrder = index
+                state.links[card.id] = link
+                return .upsertLink(link)
+            }
 
         case .updatePrompt(let cardId, let body, let imagePaths):
             guard var link = state.links[cardId] else { return [] }
@@ -762,6 +798,7 @@ public enum Reducer {
             link.manuallyArchived = true
             link.column = .allSessions
             link.pinnedAt = nil
+            link.pinnedSortOrder = nil
             link.updatedAt = .now
             // Kill tmux sessions on archive — user expects cleanup
             var effects: [Effect] = []
@@ -847,7 +884,16 @@ public enum Reducer {
             return [.loadChannelMessages(channelName: name)]
 
         case .channelsLoaded(let channels):
-            let sortedChannels = channels.sorted { $0.createdAt < $1.createdAt }
+            let sortedChannels = channels.sorted {
+                switch ($0.sortOrder, $1.sortOrder) {
+                case (let a?, let b?) where a != b: return a < b
+                case (_?, nil): return true
+                case (nil, _?): return false
+                default:
+                    if $0.createdAt != $1.createdAt { return $0.createdAt < $1.createdAt }
+                    return $0.id < $1.id
+                }
+            }
             if state.channels != sortedChannels {
                 state.channels = sortedChannels
             }
@@ -860,6 +906,25 @@ public enum Reducer {
                     ? .loadChannelMessages(channelName: channel.name)
                     : nil
             }
+
+        case .reorderChannel(let channelId, let targetChannelId, let above):
+            guard let draggedChannel = state.channels.first(where: { $0.id == channelId }) else {
+                return []
+            }
+            var channels = state.channels.filter { $0.id != channelId }
+            let insertIndex: Int
+            if let targetChannelId,
+               let targetIndex = channels.firstIndex(where: { $0.id == targetChannelId }) {
+                insertIndex = above ? targetIndex : targetIndex + 1
+            } else {
+                insertIndex = channels.count
+            }
+            channels.insert(draggedChannel, at: insertIndex)
+            for index in channels.indices {
+                channels[index].sortOrder = index
+            }
+            state.channels = channels
+            return [.persistChannels(channels)]
 
         case .channelMessagesLoaded(let name, let messages):
             let existingMessages = state.channelMessages[name]
@@ -1530,7 +1595,10 @@ public enum Reducer {
             if target.projectPath == nil { target.projectPath = source.projectPath }
             if target.name == nil { target.name = source.name }
             if target.promptBody == nil { target.promptBody = source.promptBody }
-            if target.pinnedAt == nil { target.pinnedAt = source.pinnedAt }
+            if target.pinnedAt == nil {
+                target.pinnedAt = source.pinnedAt
+                target.pinnedSortOrder = source.pinnedSortOrder
+            }
             // Merge PR links (deduplicate by PR number)
             let existingPRNumbers = Set(target.prLinks.map(\.number))
             for pr in source.prLinks where !existingPRNumbers.contains(pr.number) {
@@ -2057,7 +2125,7 @@ public final class BoardStore: @unchecked Sendable {
              .channelMessagesLoaded, .createChannel, .sendChannelMessage,
              .channelMessageAppended, .markChannelRead, .channelReadStateLoaded,
              .refreshChannelReadState, .setAppFrontmost, .deleteChannel,
-             .renameChannel, .kickChannelMember, .draftsLoaded,
+             .renameChannel, .reorderChannel, .kickChannelMember, .draftsLoaded,
              .setChannelDraft, .setDMDraft, .loadDrafts,
              .refreshDMMessages, .dmMessagesLoaded, .sendDirectMessage,
              .dmMessageAppended:

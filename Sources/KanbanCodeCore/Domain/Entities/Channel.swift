@@ -10,19 +10,24 @@ public struct Channel: Codable, Sendable, Equatable, Identifiable {
     public var createdAt: Date
     public var createdBy: ChannelParticipant
     public var members: [ChannelMember]
+    /// Manual display order in the sidebar. nil falls back to creation time
+    /// for channels written by older app or CLI versions.
+    public var sortOrder: Int?
 
     public init(
         id: String,
         name: String,
         createdAt: Date,
         createdBy: ChannelParticipant,
-        members: [ChannelMember] = []
+        members: [ChannelMember] = [],
+        sortOrder: Int? = nil
     ) {
         self.id = id
         self.name = name
         self.createdAt = createdAt
         self.createdBy = createdBy
         self.members = members
+        self.sortOrder = sortOrder
     }
 }
 

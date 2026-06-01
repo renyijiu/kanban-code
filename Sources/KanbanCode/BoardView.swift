@@ -4,6 +4,7 @@ import KanbanCodeCore
 struct BoardView: View {
     var store: BoardStore
     @State private var dragState = DragState()
+    @State private var sidebarReorderState = SidebarReorderState()
     @State private var renamingPinnedCardId: String?
     var onOpenChannel: (String) -> Void = { _ in }
     var onNewChannel: () -> Void = {}
@@ -68,16 +69,29 @@ struct BoardView: View {
                     ForEach(channels) { ch in
                         let msgs = store.state.channelMessages[ch.name]
                         let last = msgs?.last
-                        ChannelTile(
-                            channel: ch,
-                            onlineCount: onlineCountForChannel(ch),
-                            lastMessageAt: last?.ts,
-                            lastMessageBody: last?.body,
-                            isSelected: store.state.selectedChannelName == ch.name,
-                            unreadCount: unreadCountForChannel(ch),
-                            onOpen: { onOpenChannel(ch.name) },
-                            onDelete: { onDeleteChannel(ch.name) },
-                            onRename: { onRenameChannel(ch.name) }
+                        SidebarReorderableRow(
+                            item: .channel(ch.id),
+                            reorderState: sidebarReorderState,
+                            onMove: reorderChannel
+                        ) {
+                            ChannelTile(
+                                channel: ch,
+                                onlineCount: onlineCountForChannel(ch),
+                                lastMessageAt: last?.ts,
+                                lastMessageBody: last?.body,
+                                isSelected: store.state.selectedChannelName == ch.name,
+                                unreadCount: unreadCountForChannel(ch),
+                                onOpen: { onOpenChannel(ch.name) },
+                                onDelete: { onDeleteChannel(ch.name) },
+                                onRename: { onRenameChannel(ch.name) }
+                            )
+                        }
+                    }
+                    if channels.count > 1 {
+                        SidebarReorderEndTarget(
+                            kind: .channel(""),
+                            reorderState: sidebarReorderState,
+                            onMove: reorderChannel
                         )
                     }
                 }
@@ -96,13 +110,34 @@ struct BoardView: View {
                     .padding(.top, channels.isEmpty ? 2 : 6)
 
                     ForEach(pinnedCards) { card in
-                        pinnedCardView(for: card)
+                        SidebarReorderableRow(
+                            item: .pinnedCard(card.id),
+                            reorderState: sidebarReorderState,
+                            onMove: reorderPinnedCard
+                        ) {
+                            pinnedCardView(for: card)
+                        }
+                    }
+                    if pinnedCards.count > 1 {
+                        SidebarReorderEndTarget(
+                            kind: .pinnedCard(""),
+                            reorderState: sidebarReorderState,
+                            onMove: reorderPinnedCard
+                        )
                     }
                 }
             }
             .padding(.horizontal, 6)
             .frame(width: 240, alignment: .top)
         }
+    }
+
+    private func reorderChannel(_ channelId: String, _ targetChannelId: String?, _ above: Bool) {
+        store.dispatch(.reorderChannel(channelId: channelId, targetChannelId: targetChannelId, above: above))
+    }
+
+    private func reorderPinnedCard(_ cardId: String, _ targetCardId: String?, _ above: Bool) {
+        store.dispatch(.reorderPinnedCard(cardId: cardId, targetCardId: targetCardId, above: above))
     }
 
     private var boardContent: some View {
