@@ -108,12 +108,8 @@ struct KanbanCodeApp: App {
 }
 
 final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, UNUserNotificationCenterDelegate, @unchecked Sendable {
-    enum QuitDecision {
-        case cancel
-        case quit(killManagedSessions: Bool)
-    }
-
     private var terminationReplyPending = false
+    private var quitConfirmationPanel: NSPanel?
     private weak var channelShareController: ChannelShareController?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -229,20 +225,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, UNUs
         terminationReplyPending = true
         KanbanCodeLog.info("quit", "Termination requested; deferring for managed-session confirmation")
 
-        // Enter deferred termination first, then present the application-modal
-        // alert. The quit decision must not depend on SwiftUI view lifetime:
+        // Enter deferred termination first, then present the AppKit-owned
+        // sheet. The quit decision must not depend on SwiftUI view lifetime:
         // ContentView is already being torn down while AppKit waits here.
         DispatchQueue.main.async { [weak self] in
             guard self?.terminationReplyPending == true else { return }
             self?.presentQuitConfirmation(managedSessions: managedSessions)
-        }
-
-        // Never leave AppKit stuck in its deferred-termination state if the
-        // main view is not mounted or an unexpected presentation error occurs.
-        DispatchQueue.main.asyncAfter(deadline: .now() + 10) { [weak self] in
-            guard self?.terminationReplyPending == true else { return }
-            KanbanCodeLog.info("quit", "Timed out waiting for quit confirmation; cancelling termination")
-            self?.replyToTermination(false)
         }
         return .terminateLater
     }
@@ -257,46 +245,112 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, UNUs
 
     @MainActor
     private func presentQuitConfirmation(managedSessions: [TmuxSession]) {
-        switch Self.confirmQuit(
-            managedSessionCount: managedSessions.count,
-            killManagedSessions: UserDefaults.standard.bool(forKey: "killTmuxOnQuit")
-        ) {
-        case .cancel:
-            replyToTermination(false)
-        case .quit(let shouldKill):
-            UserDefaults.standard.set(shouldKill, forKey: "killTmuxOnQuit")
-            if shouldKill {
-                let sessionNames = Set(managedSessions.map(\.name))
-                for sessionName in sessionNames {
-                    Self.killTmuxSessionSync(name: sessionName)
-                }
-                CoordinationStore.clearTmuxSessionsSnapshot(sessionNames)
+        guard quitConfirmationPanel == nil else { return }
+
+        let rows = Self.quitConfirmationRows(for: managedSessions)
+        let view = QuitConfirmationView(
+            sessions: rows,
+            killManagedSessions: UserDefaults.standard.bool(forKey: "killTmuxOnQuit"),
+            onCancel: { [weak self] in
+                self?.finishQuitConfirmation(
+                    shouldTerminate: false,
+                    killManagedSessions: false,
+                    managedSessions: managedSessions
+                )
+            },
+            onQuit: { [weak self] shouldKill in
+                self?.finishQuitConfirmation(
+                    shouldTerminate: true,
+                    killManagedSessions: shouldKill,
+                    managedSessions: managedSessions
+                )
             }
-            replyToTermination(true)
+        )
+
+        let panel = NSPanel(
+            contentRect: NSRect(x: 0, y: 0, width: 520, height: 380),
+            styleMask: [.titled, .fullSizeContentView],
+            backing: .buffered,
+            defer: false
+        )
+        panel.titleVisibility = .hidden
+        panel.titlebarAppearsTransparent = true
+        panel.standardWindowButton(.closeButton)?.isHidden = true
+        panel.standardWindowButton(.miniaturizeButton)?.isHidden = true
+        panel.standardWindowButton(.zoomButton)?.isHidden = true
+        panel.isReleasedWhenClosed = false
+        panel.contentViewController = NSHostingController(rootView: view)
+        quitConfirmationPanel = panel
+
+        NSApp.activate(ignoringOtherApps: true)
+        if let parent = Self.quitConfirmationParentWindow(excluding: panel) {
+            parent.beginSheet(panel)
+        } else {
+            // The main window should normally exist, but retain an AppKit-owned
+            // fallback so a quit decision is always visible.
+            panel.center()
+            panel.makeKeyAndOrderFront(nil)
         }
     }
 
     @MainActor
-    static func confirmQuit(managedSessionCount: Int, killManagedSessions: Bool) -> QuitDecision {
-        let alert = NSAlert()
-        alert.alertStyle = .warning
-        alert.messageText = "Quit Kanban?"
-        alert.informativeText = "You have \(managedSessionCount) managed tmux session\(managedSessionCount == 1 ? "" : "s") running."
-        alert.addButton(withTitle: "Quit Kanban")
-        alert.addButton(withTitle: "Cancel")
+    private func finishQuitConfirmation(
+        shouldTerminate: Bool,
+        killManagedSessions: Bool,
+        managedSessions: [TmuxSession]
+    ) {
+        dismissQuitConfirmation()
 
-        let checkbox = NSButton(
-            checkboxWithTitle: "Kill managed sessions on quit",
-            target: nil,
-            action: nil
-        )
-        checkbox.state = killManagedSessions ? .on : .off
-        alert.accessoryView = checkbox
+        guard shouldTerminate else {
+            replyToTermination(false)
+            return
+        }
 
-        NSApp.activate(ignoringOtherApps: true)
-        alert.window.level = .modalPanel
-        guard alert.runModal() == .alertFirstButtonReturn else { return .cancel }
-        return .quit(killManagedSessions: checkbox.state == .on)
+        UserDefaults.standard.set(killManagedSessions, forKey: "killTmuxOnQuit")
+        if killManagedSessions {
+            let sessionNames = Set(managedSessions.map(\.name))
+            for sessionName in sessionNames {
+                Self.killTmuxSessionSync(name: sessionName)
+            }
+            CoordinationStore.clearTmuxSessionsSnapshot(sessionNames)
+        }
+        replyToTermination(true)
+    }
+
+    @MainActor
+    private func dismissQuitConfirmation() {
+        guard let panel = quitConfirmationPanel else { return }
+        if let parent = panel.sheetParent {
+            parent.endSheet(panel)
+        } else {
+            panel.orderOut(nil)
+        }
+        quitConfirmationPanel = nil
+    }
+
+    @MainActor
+    private static func quitConfirmationParentWindow(excluding panel: NSPanel) -> NSWindow? {
+        if let keyWindow = NSApp.keyWindow, keyWindow !== panel {
+            return keyWindow
+        }
+        if let mainWindow = NSApp.mainWindow, mainWindow !== panel {
+            return mainWindow
+        }
+        return NSApp.windows.first { window in
+            window !== panel && window.isVisible && window.canBecomeMain
+        }
+    }
+
+    static func quitConfirmationRows(for managedSessions: [TmuxSession]) -> [QuitConfirmationSession] {
+        let links = CoordinationStore.readLinksSnapshot()
+        return managedSessions.map { session in
+            let cardTitle = links.first { link in
+                link.tmuxLink?.allSessionNames.contains(session.name) == true
+            }.map { link in
+                KanbanCodeCard(link: link).displayTitle
+            }
+            return QuitConfirmationSession(session: session, cardTitle: cardTitle)
+        }
     }
 
     /// Synchronous tmux list-sessions — returns all sessions (no filtering).
