@@ -34,6 +34,13 @@ struct ListBoardSection {
     }
 }
 
+/// SwiftUI row identity includes presentation location so pinning is modeled
+/// as a clean lane removal plus pinned insertion, never as a cross-section move.
+enum ListBoardRowIdentity: Hashable {
+    case pinned(String)
+    case column(KanbanCodeColumn, String)
+}
+
 enum ListSectionCollapseState {
     static func encode(_ columns: Set<KanbanCodeColumn>) -> String {
         columns.map(\.rawValue).sorted().joined(separator: ",")

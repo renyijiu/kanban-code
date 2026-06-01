@@ -78,7 +78,11 @@ struct ListBoardView: View {
 
     private var scrollView: some View {
         ScrollView {
-            LazyVStack(alignment: .leading, spacing: 0, pinnedViews: [.sectionHeaders]) {
+            // Keep the section container eager. Moving a card between a lane
+            // and Pinned inside a LazyVStack can wedge SwiftUI's lazy placement
+            // engine while it reconciles the row across section boundaries.
+            // There are only a handful of sections; row bodies remain lazy.
+            VStack(alignment: .leading, spacing: 0) {
                 channelsSection
                 pinnedCardsSection
                 ForEach(sections, id: \.column) { section in
@@ -112,6 +116,7 @@ struct ListBoardView: View {
                 ForEach(cards) { card in
                     pinnedCardRow(for: card)
                         .padding(.horizontal, 8)
+                        .id(ListBoardRowIdentity.pinned(card.id))
                 }
             }
             .padding(.bottom, 8)
@@ -472,7 +477,7 @@ private struct ListBoardSectionView: View {
                         dragState.sourceColumn = section.column
                         return NSItemProvider(object: card.id as NSString)
                     }
-                    .id(card.id)
+                    .id(ListBoardRowIdentity.column(section.column, card.id))
                     if dragState.reorderTargetId == card.id && !dragState.reorderAbove {
                         ReorderIndicator()
                     }

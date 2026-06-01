@@ -50,4 +50,12 @@ struct BoardViewModeTests {
         #expect(ListSectionCollapseState.encode([]) == "")
         #expect(ListSectionCollapseState.decode("") == [])
     }
+
+    @Test("Pinned and lane rows use distinct SwiftUI identities")
+    func pinnedAndLaneRowsUseDistinctIdentities() {
+        let cardId = "card_pin1"
+
+        #expect(ListBoardRowIdentity.pinned(cardId) != .column(.waiting, cardId))
+        #expect(ListBoardRowIdentity.column(.waiting, cardId) != .column(.inProgress, cardId))
+    }
 }
