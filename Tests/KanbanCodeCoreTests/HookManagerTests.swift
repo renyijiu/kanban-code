@@ -149,6 +149,34 @@ struct HookManagerTests {
         #expect(!installed)
     }
 
+    @Test("HookEventStore parses new events incrementally")
+    func hookEventStoreParsesIncrementally() async throws {
+        let dir = try makeTempDir()
+        defer { cleanup(dir) }
+
+        let eventsPath = (dir as NSString).appendingPathComponent("hook-events.jsonl")
+        let first = #"{"sessionId":"s1","event":"Stop","timestamp":"2026-06-03T16:12:47.001Z","transcriptPath":"/tmp/a.jsonl"}"#
+        try first.write(toFile: eventsPath, atomically: true, encoding: .utf8)
+
+        let store = HookEventStore(basePath: dir)
+        let initial = try await store.readNewEvents()
+        #expect(initial.count == 1)
+        #expect(initial[0].sessionId == "s1")
+        #expect(initial[0].eventName == "Stop")
+        #expect(initial[0].transcriptPath == "/tmp/a.jsonl")
+
+        let second = #"{"sessionId":"s2","event":"Notification","timestamp":"2026-06-03T16:12:48Z"}"#
+        let handle = try FileHandle(forWritingTo: URL(fileURLWithPath: eventsPath))
+        defer { try? handle.close() }
+        try handle.seekToEnd()
+        try handle.write(contentsOf: Data(("\n" + second).utf8))
+
+        let next = try await store.readNewEvents()
+        #expect(next.count == 1)
+        #expect(next[0].sessionId == "s2")
+        #expect(next[0].eventName == "Notification")
+    }
+
     @Test("Install creates settings file if missing")
     func installCreatesFile() throws {
         let dir = try makeTempDir()

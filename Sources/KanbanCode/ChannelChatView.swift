@@ -117,6 +117,48 @@ private func applyChatPullRequestLinks(
     }
 }
 
+enum ChatMessageBodyRenderMode: Equatable {
+    case plainText
+    case inlineMarkdown
+    case blockMarkdown
+
+    private static let markdownCharacterLimit = 2_000
+    private static let logLikeLineLimit = 24
+    private static let terminalGlyphs = CharacterSet(charactersIn: "╭╮╰╯│─┌┐└┘├┤┬┴┼▰▱▐▛▜▌❯⎿✶✻")
+
+    static func resolve(for text: String) -> ChatMessageBodyRenderMode {
+        if shouldPreferPlainText(text) {
+            return .plainText
+        }
+        if text.containsBlockMarkdown {
+            return .blockMarkdown
+        }
+        if text.containsInlineMarkdown {
+            return .inlineMarkdown
+        }
+        return .plainText
+    }
+
+    private static func shouldPreferPlainText(_ text: String) -> Bool {
+        if text.count > markdownCharacterLimit {
+            return true
+        }
+        var lineCount = 1
+        for scalar in text.unicodeScalars {
+            if scalar == "\n" {
+                lineCount += 1
+                if lineCount > logLikeLineLimit {
+                    return true
+                }
+            }
+            if terminalGlyphs.contains(scalar) {
+                return true
+            }
+        }
+        return false
+    }
+}
+
 /// Render a chat message body with:
 ///   • Markdown — block-level constructs (headings, code fences, tables,
 ///     blockquotes) go through MarkdownUI so they actually render as such;
@@ -172,7 +214,8 @@ private struct ChatMessageBody: View {
 
     @ViewBuilder
     private var messageContent: some View {
-        if displayText.containsBlockMarkdown {
+        switch ChatMessageBodyRenderMode.resolve(for: displayText) {
+        case .blockMarkdown:
             if selectionEnabled {
                 Markdown(displayText)
                     .markdownTheme(chatMarkdownTheme)
@@ -181,13 +224,22 @@ private struct ChatMessageBody: View {
                 Markdown(displayText)
                     .markdownTheme(chatMarkdownTheme)
             }
-        } else {
+        case .inlineMarkdown:
             if selectionEnabled {
                 Text(inlineAttributed)
                     .font(.app(.body))
                     .textSelection(.enabled)
             } else {
                 Text(inlineAttributed)
+                    .font(.app(.body))
+            }
+        case .plainText:
+            if selectionEnabled {
+                Text(plainAttributed)
+                    .font(.app(.body))
+                    .textSelection(.enabled)
+            } else {
+                Text(plainAttributed)
                     .font(.app(.body))
             }
         }
@@ -221,9 +273,29 @@ private struct ChatMessageBody: View {
                 options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)
             )
             var attr = parsed ?? AttributedString(displayText)
-            applyChatPullRequestLinks(to: &attr, urlForNumber: urlForPullRequestNumber)
-            if linksActive { applyChatURLLinks(to: &attr) }
+            applyCheapLinks(to: &attr)
             return attr
+        }
+    }
+
+    private var plainAttributed: AttributedString {
+        RenderDiagnostics.measure(
+            "ChannelChatView.plainText",
+            thresholdMs: 8,
+            metadata: "chars=\(displayText.count) links=\(linksActive)"
+        ) {
+            var attr = AttributedString(displayText)
+            applyCheapLinks(to: &attr)
+            return attr
+        }
+    }
+
+    private func applyCheapLinks(to attr: inout AttributedString) {
+        if displayText.contains("#") {
+            applyChatPullRequestLinks(to: &attr, urlForNumber: urlForPullRequestNumber)
+        }
+        if linksActive, displayText.contains("http") {
+            applyChatURLLinks(to: &attr)
         }
     }
 }
@@ -380,7 +452,7 @@ struct ChannelChatView: View {
     @FocusState private var inputFocused: Bool
     @FocusState private var isSearchFieldFocused: Bool
 
-    private static let retainedScrollbackLimit = 500
+    private static let retainedScrollbackLimit = 180
     private static let searchPageSize = 500
 
     private var displayedMessages: [ChannelMessage] {
@@ -1509,7 +1581,7 @@ struct DMChatView: View {
     @State private var draftCommitTask: Task<Void, Never>?
     @FocusState private var inputFocused: Bool
 
-    private static let retainedScrollbackLimit = 500
+    private static let retainedScrollbackLimit = 180
 
     private var displayedMessages: [ChannelMessage] {
         retainedMessages.isEmpty ? Self.cappedMessages(messages) : retainedMessages

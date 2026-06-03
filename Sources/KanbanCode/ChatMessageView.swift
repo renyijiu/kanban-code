@@ -608,6 +608,12 @@ extension String {
     var containsBlockMarkdown: Bool {
         contains("```") || contains("| ") || contains("# ") || contains("> ")
     }
+
+    /// Check for lightweight inline markdown syntax. Keep this narrow so ordinary
+    /// agent logs and handles don't pay the markdown parser cost.
+    var containsInlineMarkdown: Bool {
+        contains("**") || contains("`") || contains("[")
+    }
 }
 
 // MARK: - Safe Array Subscript

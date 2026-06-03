@@ -142,6 +142,24 @@ struct ChannelUITests {
         hostAndLayout(chat)
     }
 
+    @Test func channelTerminalPastesUsePlainRenderer() {
+        let claudeOutput = """
+        ╭─── Claude Code v2.1.150 ─────────────────────────────────────────╮
+        │ Welcome back                                                     │
+        ╰──────────────────────────────────────────────────────────────────╯
+
+        ❯ hi
+          ⎿ Retrying in 10s · attempt 7/10
+        """
+        #expect(ChatMessageBodyRenderMode.resolve(for: claudeOutput) == .plainText)
+    }
+
+    @Test func channelLongMessagesUsePlainRenderer() {
+        let longMarkdownLikeMessage = Array(repeating: "> quoted log line with #4097", count: 80)
+            .joined(separator: "\n")
+        #expect(ChatMessageBodyRenderMode.resolve(for: longMarkdownLikeMessage) == .plainText)
+    }
+
     @MainActor
     @Test func mentionQueryDetection() {
         #expect(ChatInputBar.activeMentionQuery(in: "") == nil)
