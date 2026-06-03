@@ -354,6 +354,7 @@ struct ChannelChatView: View {
     /// opens the share dialog and an active share is shown as a banner
     /// below the header. When nil, all share UI is hidden.
     var shareController: ChannelShareController? = nil
+    var onCopyConversationMarkdown: () -> Void = {}
 
     @State private var rosterExpanded = false
     @State private var isNearBottom: Bool = true
@@ -546,6 +547,7 @@ struct ChannelChatView: View {
             if shareController != nil {
                 shareButton
             }
+            channelActionsMenu
             Button(action: onClose) {
                 Image(systemName: "xmark.circle.fill")
                     .font(.app(.body))
@@ -556,6 +558,21 @@ struct ChannelChatView: View {
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 10)
+    }
+
+    private var channelActionsMenu: some View {
+        Menu {
+            Button(action: onCopyConversationMarkdown) {
+                Label("Copy Whole Conversation as Markdown", systemImage: "text.page")
+            }
+        } label: {
+            Image(systemName: "ellipsis.circle")
+                .font(.app(.body))
+                .foregroundStyle(.secondary)
+        }
+        .menuStyle(.button)
+        .buttonStyle(.plain)
+        .help("Channel actions")
     }
 
     private var prStrip: some View {

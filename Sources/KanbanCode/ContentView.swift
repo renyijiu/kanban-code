@@ -713,6 +713,30 @@ struct ContentView: View {
         }
     }
 
+    private func copyChannelConversationMarkdown(channelName: String) {
+        let exportStart = RenderDiagnostics.mark()
+        Task {
+            let markdown = await Task.detached(priority: .utility) {
+                let channelsStore = ChannelsStore()
+                let messages = await channelsStore.loadMessages(channel: channelName, limit: nil)
+                return ChannelConversationMarkdownExporter.markdown(
+                    channelName: channelName,
+                    messages: messages
+                )
+            }.value
+
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setString(markdown, forType: .string)
+            store.dispatch(.setError("Channel conversation markdown copied to clipboard"))
+            RenderDiagnostics.logIfSlow(
+                "ContentView.copyChannelConversationMarkdown",
+                since: exportStart,
+                thresholdMs: 100,
+                metadata: "channel=\(channelName)"
+            )
+        }
+    }
+
     @ViewBuilder
     private var inspectorContent: some View {
         if let dm = store.state.selectedDMParticipant {
@@ -2652,7 +2676,10 @@ struct ContentView: View {
                     }
                 }
             ),
-            shareController: shareController
+            shareController: shareController,
+            onCopyConversationMarkdown: {
+                copyChannelConversationMarkdown(channelName: channel.name)
+            }
         )
         .id("channel:\(channel.name)")
         .task(id: channelGithubBaseURLResolutionKey(channel: channel, messages: msgs)) {

@@ -227,33 +227,40 @@ final class SystemTray: NSObject, @unchecked Sendable {
     /// Stop the active-session helper when no more active sessions.
     /// Also discovers and kills orphaned processes from previous app instances.
     private func stopActiveSession() {
+        var helperPIDs: [pid_t?] = []
+
         if let app = activeSessionApp, !app.isTerminated {
-            let pid = app.processIdentifier
-            Self.log("stopping active-session: pid=\(pid)")
-            // Use kill() instead of NSRunningApplication.terminate() to avoid
-            // Apple Events crash (EXC_BAD_ACCESS) when the target process is stale.
-            kill(pid, SIGTERM)
-            DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
-                // Force kill if still running
-                if kill(pid, 0) == 0 { kill(pid, SIGKILL) }
-            }
+            helperPIDs.append(app.processIdentifier)
         }
         activeSessionApp = nil
 
         if let proc = activeSessionProcess, proc.isRunning {
-            Self.log("stopping active-session (bare): pid=\(proc.processIdentifier)")
-            proc.terminate()
+            helperPIDs.append(proc.processIdentifier)
         }
         activeSessionProcess = nil
 
-        // Kill any orphaned active-session from a previous app instance (crash, rebuild, etc.)
+        // Collect orphaned helpers from previous app instances before signaling any
+        // process. LaunchServices can temporarily report a helper after SIGTERM, so
+        // using NSRunningApplication.terminate() here can send an AppleEvent through
+        // a stale application port and crash inside AE.framework.
         for app in NSWorkspace.shared.runningApplications where app.bundleIdentifier == Self.activeSessionBundleID && !app.isTerminated {
-            Self.log("stopping orphaned active-session: pid=\(app.processIdentifier)")
-            app.terminate()
+            helperPIDs.append(app.processIdentifier)
+        }
+
+        for pid in Self.uniqueActiveSessionPIDs(helperPIDs) {
+            Self.log("stopping active-session: pid=\(pid)")
+            kill(pid, SIGTERM)
             DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
-                if !app.isTerminated { app.forceTerminate() }
+                if kill(pid, 0) == 0 { kill(pid, SIGKILL) }
             }
         }
+    }
+
+    nonisolated static func uniqueActiveSessionPIDs(_ candidates: [pid_t?]) -> Set<pid_t> {
+        Set(candidates.compactMap { pid in
+            guard let pid, pid > 0 else { return nil }
+            return pid
+        })
     }
 
     // MARK: - Logging
