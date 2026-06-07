@@ -94,6 +94,73 @@ function fenceBlock(label: string): string {
   return "```\n" + label + "\n```";
 }
 
+/// Convert GitHub-flavoured Markdown (the syntax Claude and Codex emit in
+/// their assistant prose) into Slack mrkdwn. Slack renders `text` field as
+/// mrkdwn by default, but the two dialects don't agree on the syntax:
+///   GFM `**bold**`        -> Slack `*bold*`
+///   GFM `*italic*`        -> Slack `_italic_`     (Slack treats `*x*` as bold)
+///   GFM `__bold__`        -> Slack `*bold*`
+///   GFM `~~strike~~`      -> Slack `~strike~`
+///   GFM `# heading`       -> Slack `*heading*`    (Slack has no headings)
+///   GFM `[label](url)`    -> Slack `<url|label>`
+///
+/// Slack mrkdwn that already matches the input stays the same:
+///   underscored italic, blockquotes (`>`), inline code, fenced code blocks,
+///   and `-` / `*` / `1.` lists (since Slack's 2024 markdown refresh).
+///
+/// Code spans / fenced code blocks are preserved verbatim — we don't want to
+/// translate Markdown-looking content inside `\`...\`` or ``` ``` ``` ``` .
+export function gfmToSlackMrkdwn(input: string): string {
+  // Split off fenced code blocks first; odd-indexed splits ARE the fences.
+  const fenceParts = input.split(/(```[\s\S]*?```)/g);
+  return fenceParts
+    .map((part, i) => (i % 2 === 1 ? part : transformProse(part)))
+    .join("");
+}
+
+const BOLD_SENTINEL = "BOLD";
+
+function transformProse(s: string): string {
+  // Split off inline code spans next; those are also preserved verbatim.
+  const codeParts = s.split(/(`[^`\n]+`)/g);
+  return codeParts
+    .map((part, i) => (i % 2 === 1 ? part : transformText(part)))
+    .join("");
+}
+
+function transformText(s: string): string {
+  // Bold first — both `**x**` and `__x__`. Stash to a sentinel so the
+  // single-asterisk italic pass below doesn't mistakenly italicise the
+  // intermediate `*x*` form.
+  const bolds: string[] = [];
+  const stash = (body: string) => {
+    bolds.push(body);
+    return `${BOLD_SENTINEL}${bolds.length - 1}${BOLD_SENTINEL}`;
+  };
+  let out = s
+    .replace(/\*\*([^*\n]+)\*\*/g, (_m, body) => stash(body))
+    .replace(/__([^_\n]+)__/g, (_m, body) => stash(body));
+
+  // Markdown single-asterisk italic -> Slack underscore italic. Anything
+  // already in `_..._` stays correct.
+  out = out.replace(/\*([^*\n]+)\*/g, "_$1_");
+
+  // Restore bolds as Slack `*x*`.
+  out = out.replace(new RegExp(`${BOLD_SENTINEL}(\\d+)${BOLD_SENTINEL}`, "g"), (_m, idx) => `*${bolds[Number(idx)]}*`);
+
+  // Strikethrough: `~~x~~` -> `~x~`.
+  out = out.replace(/~~([^~\n]+)~~/g, "~$1~");
+
+  // ATX headings -> bold line (Slack has no heading concept; bold-line is the
+  // operator convention in agent channels).
+  out = out.replace(/^#{1,6}\s+(.+)$/gm, "*$1*");
+
+  // Markdown links `[label](url)` -> Slack link `<url|label>`.
+  out = out.replace(/\[([^\]\n]+)\]\(([^)\s]+)\)/g, "<$2|$1>");
+
+  return out;
+}
+
 function role(obj: any): string | undefined {
   return obj?.type ?? obj?.message?.role;
 }
@@ -104,14 +171,14 @@ function role(obj: any): string | undefined {
 function emitAssistantBlocks(content: any, out: SlackPost[]): void {
   if (typeof content === "string") {
     const t = truncate(content);
-    if (t) out.push({ role: "assistant", kind: "text", text: t });
+    if (t) out.push({ role: "assistant", kind: "text", text: gfmToSlackMrkdwn(t) });
     return;
   }
   if (!Array.isArray(content)) return;
   for (const block of content) {
     switch (block?.type) {
       case "text": {
-        if (block.text?.trim()) out.push({ role: "assistant", kind: "text", text: truncate(block.text) });
+        if (block.text?.trim()) out.push({ role: "assistant", kind: "text", text: gfmToSlackMrkdwn(truncate(block.text)) });
         break;
       }
       case "thinking": {
@@ -151,6 +218,11 @@ function coalesceTools(posts: SlackPost[]): SlackPost[] {
   return out;
 }
 
+/// Claude `stop_reason` values that mean "the agent is done; this turn won't
+/// produce more output". `tool_use` / `max_tokens` / `pause_turn` are NOT
+/// terminal — the agent will continue on the next call.
+const TERMINAL_STOP_REASONS = new Set(["end_turn", "stop_sequence", "refusal"]);
+
 /// Convert a batch of transcript lines into Slack posts. User turns and
 /// tool_result lines are skipped: relayed human messages already appear in
 /// Slack as that human's own message, and automated prompts are announced
@@ -159,7 +231,24 @@ export function formatTranscriptLines(objs: any[]): SlackPost[] {
   const posts: SlackPost[] = [];
   for (const obj of objs) {
     if (role(obj) !== "assistant") continue;
+    const before = posts.length;
     emitAssistantBlocks(obj.message?.content ?? obj.content, posts);
+    // When the assistant finishes its turn (stop_reason: end_turn et al.),
+    // mark the LAST text post we just emitted as terminal. The bridge reads
+    // that flag and drops the "is working…" pill instead of re-attaching it
+    // — otherwise the pill stays on the channel forever after the agent
+    // completes a turn with a final text post. Without this, every Claude
+    // run leaves a stale pill hanging under the last message; previously
+    // only the codex out-of-credits sentinel set this flag.
+    const stopReason = obj?.message?.stop_reason;
+    if (typeof stopReason === "string" && TERMINAL_STOP_REASONS.has(stopReason)) {
+      for (let i = posts.length - 1; i >= before; i--) {
+        if (posts[i].kind === "text") {
+          posts[i].terminal = true;
+          break;
+        }
+      }
+    }
   }
   return coalesceTools(posts);
 }
@@ -187,7 +276,7 @@ export function formatCodexRolloutLines(objs: any[]): SlackPost[] {
     if (p.type === "user_message" && typeof p.message === "string" && p.message.trim()) {
       posts.push({ role: "user", kind: "text", text: formatReceivedMessage(truncate(p.message)) });
     } else if (p.type === "agent_message" && typeof p.message === "string" && p.message.trim()) {
-      posts.push({ role: "assistant", kind: "text", text: truncate(p.message) });
+      posts.push({ role: "assistant", kind: "text", text: gfmToSlackMrkdwn(truncate(p.message)) });
     } else if (p.type === "exec_command_begin") {
       const cmd = Array.isArray(p.command) ? p.command.join(" ") : String(p.command ?? "");
       if (cmd.trim()) {

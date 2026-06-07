@@ -224,7 +224,11 @@ describe("kanban channel (CLI e2e)", () => {
     const r = runCli(["self-compact", "--follow-up-delay", "0.1", "Continue", "after", "compact."], env);
     assert.equal(r.code, 0, r.stderr);
     assert.match(r.stdout, /Sent \/compact to sess-self with post-compact follow-up/);
-    execFileSync("sleep", ["0.8"]);
+    // The detached self-compact shell sleeps 2s before Escape (see
+    // scheduleTmuxSelfCompact in data.ts), then the per-step sleeps and the
+    // follow-up delay. Wait past all of that so every fake-tmux line we
+    // assert on has been written to the log file.
+    execFileSync("sleep", ["2.8"]);
 
     const log = readFileSync(logPath, "utf-8");
     assert.match(log, /display-message -p #S/);
@@ -266,7 +270,9 @@ describe("kanban channel (CLI e2e)", () => {
     const r = runCli(["self-compact"], env);
     assert.equal(r.code, 0, r.stderr);
     assert.match(r.stdout, /Sent \/compact to sess-self-no-follow-up\./);
-    execFileSync("sleep", ["0.4"]);
+    // Detached shell sleeps 2s before Escape (see scheduleTmuxSelfCompact);
+    // wait past it before reading the log.
+    execFileSync("sleep", ["2.4"]);
 
     const log = readFileSync(logPath, "utf-8");
     assert.match(log, /set-buffer \/compact/);
