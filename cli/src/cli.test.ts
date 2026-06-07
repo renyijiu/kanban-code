@@ -234,11 +234,11 @@ describe("kanban channel (CLI e2e)", () => {
     assert.match(log, /display-message -p #S/);
     assert.match(log, /send-keys -t sess-self Enter/);
     assert.match(log, /send-keys -t sess-self Escape/);
-    assert.match(log, /set-buffer \/compact/);
-    assert.match(log, /paste-buffer -p -t sess-self/);
+    assert.match(log, /set-buffer -b kc-\d+-\d+ \/compact/);
+    assert.match(log, /paste-buffer -p -d -b kc-\d+-\d+ -t sess-self/);
     assert.match(log, /send-keys -t sess-self Enter/);
-    assert.match(log, /set-buffer Continue after compact\./);
-    assert.match(log, /paste-buffer -p -t sess-self/);
+    assert.match(log, /set-buffer -b kc-\d+-\d+ Continue after compact\./);
+    assert.match(log, /paste-buffer -p -d -b kc-\d+-\d+ -t sess-self/);
   });
 
   test("self-compact submits /compact when no follow-up prompt is provided", () => {
@@ -275,8 +275,8 @@ describe("kanban channel (CLI e2e)", () => {
     execFileSync("sleep", ["2.4"]);
 
     const log = readFileSync(logPath, "utf-8");
-    assert.match(log, /set-buffer \/compact/);
-    assert.match(log, /paste-buffer -p -t sess-self-no-follow-up/);
+    assert.match(log, /set-buffer -b kc-\d+-\d+ \/compact/);
+    assert.match(log, /paste-buffer -p -d -b kc-\d+-\d+ -t sess-self-no-follow-up/);
     assert.match(log, /send-keys -t sess-self-no-follow-up Enter/);
   });
 
