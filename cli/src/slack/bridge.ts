@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { SocketModeClient } from "@slack/socket-mode";
 import { SlackClient } from "./client.js";
 import { routeSlackMessage, ChannelMapping } from "./inbound.js";
-import { formatTranscriptLines, formatCodexRolloutLines } from "./format.js";
+import { formatTranscriptLines, formatCodexRolloutLines, TERMINAL_STOP_REASONS } from "./format.js";
 import { loadAgentsConfig } from "../agents/config.js";
 import { agentIdentity } from "../agents/identity.js";
 import { Runtime } from "../agents/runtime.js";
@@ -79,6 +79,72 @@ function pickerSelectedBlocks(picker: Picker, choice: number, by: string): { tex
   const label = chosen ? `${choice}. ${chosen.title}` : String(choice);
   const text = `${picker.question || "Selected"} — picked: *${label}* by <@${by}>`;
   return { text, blocks: [{ type: "section", text: { type: "mrkdwn", text } }] };
+}
+
+/// Read up to the last `tailBytes` of a jsonl file and return the parsed
+/// objects in order. Used by the restore-time turn-end check to inspect the
+/// most recent agent activity without loading the whole transcript (Claude
+/// transcripts grow to hundreds of MB). Returns [] on any read error so the
+/// caller can fall back to "assume turn is still live".
+function readTailObjs(path: string, tailBytes = 64 * 1024): any[] {
+  try {
+    const size = statSync(path).size;
+    const readFrom = Math.max(0, size - tailBytes);
+    const fd = openSync(path, "r");
+    const buf = Buffer.alloc(size - readFrom);
+    readSync(fd, buf, 0, buf.length, readFrom);
+    closeSync(fd);
+    const text = buf.toString("utf-8");
+    // Drop the partial first line when we did not start from byte 0 — it is
+    // almost certainly cut mid-JSON and parsing it would just throw.
+    const sliceFrom = readFrom > 0 ? text.indexOf("\n") + 1 : 0;
+    const objs: any[] = [];
+    for (const line of text.slice(sliceFrom).split("\n")) {
+      if (!line.trim()) continue;
+      try {
+        objs.push(JSON.parse(line));
+      } catch {
+        /* skip malformed */
+      }
+    }
+    return objs;
+  } catch {
+    return [];
+  }
+}
+
+/// True when the agent's most recent Claude assistant turn carries a
+/// terminal stop_reason (end_turn / stop_sequence / refusal). Used at bridge
+/// startup to detect that the live pill state on disk no longer reflects
+/// active work — the bridge crashed/restarted AFTER the agent finished a
+/// turn, the offset jumped past the end_turn marker, and the normal post
+/// loop would never see it again so the refresh loop would re-light the
+/// pill forever.
+export function claudeTranscriptTurnEnded(path: string): boolean {
+  const objs = readTailObjs(path);
+  for (let i = objs.length - 1; i >= 0; i--) {
+    const o = objs[i];
+    if (o?.type !== "assistant") continue;
+    const sr = o?.message?.stop_reason;
+    return typeof sr === "string" && TERMINAL_STOP_REASONS.has(sr);
+  }
+  return false;
+}
+
+/// True when the agent's most recent Codex turn has a `task_complete` event
+/// AFTER any subsequent `user_message`. Mirror of the Claude check above for
+/// the codex-runtime side.
+export function codexRolloutTurnEnded(path: string): boolean {
+  const objs = readTailObjs(path);
+  let lastUserAt = -1;
+  let lastTaskCompleteAt = -1;
+  for (let i = 0; i < objs.length; i++) {
+    const p = objs[i]?.type === "event_msg" ? objs[i].payload : undefined;
+    if (!p) continue;
+    if (p.type === "user_message") lastUserAt = i;
+    else if (p.type === "task_complete") lastTaskCompleteAt = i;
+  }
+  return lastTaskCompleteAt >= 0 && lastTaskCompleteAt > lastUserAt;
 }
 
 function readAppendedLines(path: string, offset: number): { objs: any[]; newOffset: number } {
@@ -179,6 +245,30 @@ export async function runSlackBridge(opts: BridgeOptions): Promise<void> {
     const pill = readActivePill(a.slug);
     if (!pill) continue;
     if (Date.now() - pill.lastSetMs > MAX_RESTORE_AGE_MS) {
+      clearActivePill(a.slug);
+      continue;
+    }
+    // Cross-restart turn-end check. The MAX_RESTORE_AGE_MS guard above is
+    // defeated by the refresh loop bumping lastSetMs every minute — even an
+    // hours-old idle turn looks "recent" on restore. Tail-scan the agent's
+    // transcript / rollout: if the most recent assistant turn already ended
+    // (Claude terminal stop_reason or codex task_complete after the last
+    // user_message), drop the pill instead of re-lighting it. Without this
+    // the channel keeps showing "is working…" for as long as the bridge runs
+    // even though Claude's stop_reason landed before this process started.
+    const tail = tails.find((t) => t.slug === a.slug);
+    const turnEnded =
+      tail?.path
+        ? tail.runtime === "codex"
+          ? codexRolloutTurnEnded(tail.path)
+          : claudeTranscriptTurnEnded(tail.path)
+        : false;
+    if (turnEnded) {
+      try {
+        await client.setStatus(pill.channelId, pill.threadTs, "");
+      } catch (e) {
+        console.error(`clear stale pill on restore for ${a.slug} failed:`, e);
+      }
       clearActivePill(a.slug);
       continue;
     }
