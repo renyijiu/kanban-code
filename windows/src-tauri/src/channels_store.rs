@@ -7,8 +7,9 @@ use tokio::fs;
 use tokio::io::AsyncWriteExt;
 
 use crate::channels::{
-    gen_id, is_valid_channel_name, normalize_channel_name, Channel, ChannelMember,
-    ChannelMessage, ChannelParticipant, ChannelsContainer, MessageType,
+    extract_mentions, gen_id, is_valid_channel_name, normalize_channel_name, Channel,
+    ChannelMember, ChannelMessage, ChannelParticipant, ChannelsContainer, MessageRefs,
+    MessageType,
 };
 use crate::coordination_store::kanban_data_dir;
 
@@ -234,6 +235,8 @@ impl ChannelsStore {
             kind: MessageType::Join,
             image_paths: None,
             source: None,
+            refs: None,
+            mentions: None,
         };
         self.append_message(&clean, &event).await?;
         Ok((channel_after, false))
@@ -265,6 +268,8 @@ impl ChannelsStore {
             kind: MessageType::Leave,
             image_paths: None,
             source: None,
+            refs: None,
+            mentions: None,
         };
         self.append_message(&clean, &event).await?;
         Ok(Some(channel_after))
@@ -292,6 +297,7 @@ impl ChannelsStore {
         }
         let id = gen_id("msg");
         let persisted = self.persist_images(&id, &image_paths).await?;
+        let mentions = extract_mentions(&body);
         let msg = ChannelMessage {
             id,
             ts: Utc::now(),
@@ -300,6 +306,94 @@ impl ChannelsStore {
             kind: MessageType::Message,
             image_paths: if persisted.is_empty() { None } else { Some(persisted) },
             source: None,
+            refs: None,
+            mentions: if mentions.is_empty() { None } else { Some(mentions) },
+        };
+        self.append_message(&clean, &msg).await?;
+        Ok(msg)
+    }
+
+    /// Appends an Edit row for `target_id`. The render layer collapses by
+    /// taking the latest Edit for each target id (#113).
+    pub async fn edit_channel_message(
+        &self,
+        channel: &str,
+        target_id: &str,
+        from: ChannelParticipant,
+        new_body: String,
+    ) -> Result<ChannelMessage> {
+        let clean = normalize_channel_name(channel);
+        let mentions = extract_mentions(&new_body);
+        let msg = ChannelMessage {
+            id: gen_id("msg"),
+            ts: Utc::now(),
+            from,
+            body: new_body,
+            kind: MessageType::Edit,
+            image_paths: None,
+            source: None,
+            refs: Some(MessageRefs {
+                edits_message_id: Some(target_id.to_string()),
+                reaction_to: None,
+                emoji: None,
+            }),
+            mentions: if mentions.is_empty() { None } else { Some(mentions) },
+        };
+        self.append_message(&clean, &msg).await?;
+        Ok(msg)
+    }
+
+    /// Appends a Delete row for `target_id`; render layer hides it (#113).
+    pub async fn delete_channel_message(
+        &self,
+        channel: &str,
+        target_id: &str,
+        from: ChannelParticipant,
+    ) -> Result<ChannelMessage> {
+        let clean = normalize_channel_name(channel);
+        let msg = ChannelMessage {
+            id: gen_id("msg"),
+            ts: Utc::now(),
+            from,
+            body: String::new(),
+            kind: MessageType::Delete,
+            image_paths: None,
+            source: None,
+            refs: Some(MessageRefs {
+                edits_message_id: Some(target_id.to_string()),
+                reaction_to: None,
+                emoji: None,
+            }),
+            mentions: None,
+        };
+        self.append_message(&clean, &msg).await?;
+        Ok(msg)
+    }
+
+    /// Appends a Reaction row; render layer aggregates by (target, emoji)
+    /// and toggles by count parity per sender (#113).
+    pub async fn react_channel_message(
+        &self,
+        channel: &str,
+        target_id: &str,
+        from: ChannelParticipant,
+        emoji: String,
+    ) -> Result<ChannelMessage> {
+        let clean = normalize_channel_name(channel);
+        let msg = ChannelMessage {
+            id: gen_id("msg"),
+            ts: Utc::now(),
+            from,
+            body: String::new(),
+            kind: MessageType::Reaction,
+            image_paths: None,
+            source: None,
+            refs: Some(MessageRefs {
+                edits_message_id: None,
+                reaction_to: Some(target_id.to_string()),
+                emoji: Some(emoji),
+            }),
+            mentions: None,
         };
         self.append_message(&clean, &msg).await?;
         Ok(msg)
@@ -334,6 +428,7 @@ impl ChannelsStore {
         self.ensure_dirs().await?;
         let id = gen_id("msg");
         let persisted = self.persist_images(&id, &image_paths).await?;
+        let mentions = extract_mentions(&body);
         let msg = ChannelMessage {
             id,
             ts: Utc::now(),
@@ -342,9 +437,95 @@ impl ChannelsStore {
             kind: MessageType::Message,
             image_paths: if persisted.is_empty() { None } else { Some(persisted) },
             source: None,
+            refs: None,
+            mentions: if mentions.is_empty() { None } else { Some(mentions) },
         };
         let path = self.dm_log_path(&from, &to);
         Self::append_jsonl(&path, &msg).await?;
+        Ok(msg)
+    }
+
+    pub async fn edit_dm_message(
+        &self,
+        a: &ChannelParticipant,
+        b: &ChannelParticipant,
+        target_id: &str,
+        from: ChannelParticipant,
+        new_body: String,
+    ) -> Result<ChannelMessage> {
+        self.ensure_dirs().await?;
+        let mentions = extract_mentions(&new_body);
+        let msg = ChannelMessage {
+            id: gen_id("msg"),
+            ts: Utc::now(),
+            from,
+            body: new_body,
+            kind: MessageType::Edit,
+            image_paths: None,
+            source: None,
+            refs: Some(MessageRefs {
+                edits_message_id: Some(target_id.to_string()),
+                reaction_to: None,
+                emoji: None,
+            }),
+            mentions: if mentions.is_empty() { None } else { Some(mentions) },
+        };
+        Self::append_jsonl(&self.dm_log_path(a, b), &msg).await?;
+        Ok(msg)
+    }
+
+    pub async fn delete_dm_message(
+        &self,
+        a: &ChannelParticipant,
+        b: &ChannelParticipant,
+        target_id: &str,
+        from: ChannelParticipant,
+    ) -> Result<ChannelMessage> {
+        self.ensure_dirs().await?;
+        let msg = ChannelMessage {
+            id: gen_id("msg"),
+            ts: Utc::now(),
+            from,
+            body: String::new(),
+            kind: MessageType::Delete,
+            image_paths: None,
+            source: None,
+            refs: Some(MessageRefs {
+                edits_message_id: Some(target_id.to_string()),
+                reaction_to: None,
+                emoji: None,
+            }),
+            mentions: None,
+        };
+        Self::append_jsonl(&self.dm_log_path(a, b), &msg).await?;
+        Ok(msg)
+    }
+
+    pub async fn react_dm_message(
+        &self,
+        a: &ChannelParticipant,
+        b: &ChannelParticipant,
+        target_id: &str,
+        from: ChannelParticipant,
+        emoji: String,
+    ) -> Result<ChannelMessage> {
+        self.ensure_dirs().await?;
+        let msg = ChannelMessage {
+            id: gen_id("msg"),
+            ts: Utc::now(),
+            from,
+            body: String::new(),
+            kind: MessageType::Reaction,
+            image_paths: None,
+            source: None,
+            refs: Some(MessageRefs {
+                edits_message_id: None,
+                reaction_to: Some(target_id.to_string()),
+                emoji: Some(emoji),
+            }),
+            mentions: None,
+        };
+        Self::append_jsonl(&self.dm_log_path(a, b), &msg).await?;
         Ok(msg)
     }
 
@@ -792,6 +973,68 @@ mod tests {
         let channels = store.load_channels().await.unwrap();
         assert_eq!(channels.len(), 1);
         assert_eq!(channels[0].name, "general");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    // ── #113 edit/delete/react ───────────────────────────────────────────
+
+    #[tokio::test]
+    async fn edit_delete_react_round_trip() {
+        let base = tmp_base();
+        let store = ChannelsStore::new(Some(base.clone()));
+        store.create_channel("eng", ChannelParticipant::user("user")).await.unwrap();
+        let original = store
+            .send_message(
+                "eng",
+                ChannelParticipant::user("user"),
+                "hi @alice and @bob".into(),
+                vec![],
+            )
+            .await
+            .unwrap();
+        // mentions populated on send
+        assert_eq!(
+            original.mentions.as_ref().map(|m| m.as_slice()),
+            Some(["alice".to_string(), "bob".to_string()].as_slice())
+        );
+
+        let edit = store
+            .edit_channel_message("eng", &original.id, ChannelParticipant::user("user"), "hi @carol".into())
+            .await
+            .unwrap();
+        assert_eq!(edit.kind, MessageType::Edit);
+        assert_eq!(
+            edit.refs.as_ref().and_then(|r| r.edits_message_id.as_deref()),
+            Some(original.id.as_str())
+        );
+        assert_eq!(
+            edit.mentions.as_ref().map(|m| m.as_slice()),
+            Some(["carol".to_string()].as_slice())
+        );
+
+        let react = store
+            .react_channel_message("eng", &original.id, ChannelParticipant::user("user"), "🎉".into())
+            .await
+            .unwrap();
+        assert_eq!(react.kind, MessageType::Reaction);
+        assert_eq!(
+            react.refs.as_ref().and_then(|r| r.emoji.as_deref()),
+            Some("🎉")
+        );
+
+        let del = store
+            .delete_channel_message("eng", &original.id, ChannelParticipant::user("user"))
+            .await
+            .unwrap();
+        assert_eq!(del.kind, MessageType::Delete);
+
+        // All four rows survive a re-read.
+        let all = store.read_messages("eng", None).await.unwrap();
+        assert_eq!(all.len(), 4);
+        assert_eq!(all[0].kind, MessageType::Message);
+        assert_eq!(all[1].kind, MessageType::Edit);
+        assert_eq!(all[2].kind, MessageType::Reaction);
+        assert_eq!(all[3].kind, MessageType::Delete);
         let _ = std::fs::remove_dir_all(&base);
     }
 

@@ -116,6 +116,37 @@ enum ChannelCmd {
         #[arg(short, long)]
         json: bool,
     },
+    /// Edit a previously-sent message. Appends an Edit row; render layer
+    /// collapses it into the original message body (#113).
+    Edit {
+        name: String,
+        message_id: String,
+        #[command(flatten)]
+        ident: IdentityOpts,
+        #[arg(short, long)]
+        json: bool,
+        #[arg(required = true)]
+        body: Vec<String>,
+    },
+    /// Soft-delete a message — append a Delete row (#113).
+    DeleteMsg {
+        name: String,
+        message_id: String,
+        #[command(flatten)]
+        ident: IdentityOpts,
+        #[arg(short, long)]
+        json: bool,
+    },
+    /// Add (or toggle off) an emoji reaction on a message (#113).
+    React {
+        name: String,
+        message_id: String,
+        emoji: String,
+        #[command(flatten)]
+        ident: IdentityOpts,
+        #[arg(short, long)]
+        json: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -148,6 +179,36 @@ enum DmCmd {
     },
     /// List the DM threads the caller participates in.
     List {
+        #[arg(short, long)]
+        json: bool,
+    },
+    /// Edit a DM message (#113).
+    Edit {
+        other: String,
+        message_id: String,
+        #[command(flatten)]
+        ident: IdentityOpts,
+        #[arg(short, long)]
+        json: bool,
+        #[arg(required = true)]
+        body: Vec<String>,
+    },
+    /// Soft-delete a DM message (#113).
+    DeleteMsg {
+        other: String,
+        message_id: String,
+        #[command(flatten)]
+        ident: IdentityOpts,
+        #[arg(short, long)]
+        json: bool,
+    },
+    /// React to a DM message with an emoji (#113).
+    React {
+        other: String,
+        message_id: String,
+        emoji: String,
+        #[command(flatten)]
+        ident: IdentityOpts,
         #[arg(short, long)]
         json: bool,
     },
@@ -403,6 +464,46 @@ async fn run_channel(cmd: ChannelCmd, store: &ChannelsStore) -> anyhow::Result<(
             }
             Ok(())
         }
+        ChannelCmd::Edit { name, message_id, ident, json, body } => {
+            let caller = resolve_caller(&ident);
+            let clean = normalize_channel_name(&name);
+            let new_body = body.join(" ");
+            let msg = store
+                .edit_channel_message(&clean, &message_id, caller.clone(), new_body.clone())
+                .await?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&msg)?);
+            } else {
+                println!("edited {} in #{}: {}", message_id, clean, new_body);
+            }
+            Ok(())
+        }
+        ChannelCmd::DeleteMsg { name, message_id, ident, json } => {
+            let caller = resolve_caller(&ident);
+            let clean = normalize_channel_name(&name);
+            let msg = store
+                .delete_channel_message(&clean, &message_id, caller.clone())
+                .await?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&msg)?);
+            } else {
+                println!("deleted {} in #{}", message_id, clean);
+            }
+            Ok(())
+        }
+        ChannelCmd::React { name, message_id, emoji, ident, json } => {
+            let caller = resolve_caller(&ident);
+            let clean = normalize_channel_name(&name);
+            let msg = store
+                .react_channel_message(&clean, &message_id, caller.clone(), emoji.clone())
+                .await?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&msg)?);
+            } else {
+                println!("@{} reacted {} on {} in #{}", caller.handle, emoji, message_id, clean);
+            }
+            Ok(())
+        }
         ChannelCmd::Rename { old, new, json } => {
             let renamed = store.rename_channel(&old, &new).await?;
             if json {
@@ -478,6 +579,46 @@ async fn run_dm(cmd: DmCmd, store: &ChannelsStore) -> anyhow::Result<()> {
             }
             for m in &msgs {
                 println!("[{}] @{}: {}", m.ts.to_rfc3339(), m.from.handle, m.body);
+            }
+            Ok(())
+        }
+        DmCmd::Edit { other, message_id, ident, json, body } => {
+            let me = resolve_caller(&ident);
+            let target = parse_target(&other);
+            let new_body = body.join(" ");
+            let msg = store
+                .edit_dm_message(&me, &target, &message_id, me.clone(), new_body.clone())
+                .await?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&msg)?);
+            } else {
+                println!("edited {} in dm with {}: {}", message_id, other, new_body);
+            }
+            Ok(())
+        }
+        DmCmd::DeleteMsg { other, message_id, ident, json } => {
+            let me = resolve_caller(&ident);
+            let target = parse_target(&other);
+            let msg = store
+                .delete_dm_message(&me, &target, &message_id, me.clone())
+                .await?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&msg)?);
+            } else {
+                println!("deleted {} in dm with {}", message_id, other);
+            }
+            Ok(())
+        }
+        DmCmd::React { other, message_id, emoji, ident, json } => {
+            let me = resolve_caller(&ident);
+            let target = parse_target(&other);
+            let msg = store
+                .react_dm_message(&me, &target, &message_id, me.clone(), emoji.clone())
+                .await?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&msg)?);
+            } else {
+                println!("@{} reacted {} on {} in dm with {}", me.handle, emoji, message_id, other);
             }
             Ok(())
         }

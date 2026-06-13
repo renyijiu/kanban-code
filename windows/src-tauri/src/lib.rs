@@ -824,6 +824,53 @@ async fn read_channel_messages(
         .map_err(|e| e.to_string())
 }
 
+/// Append-only edit; render layer collapses (#113).
+#[tauri::command]
+async fn edit_channel_message(
+    channel: String,
+    target_id: String,
+    from: ChannelParticipant,
+    new_body: String,
+    state: tauri::State<'_, AppState>,
+) -> Result<ChannelMessage, String> {
+    state
+        .channels_store
+        .edit_channel_message(&channel, &target_id, from, new_body)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Append-only soft-delete (#113).
+#[tauri::command]
+async fn delete_channel_message(
+    channel: String,
+    target_id: String,
+    from: ChannelParticipant,
+    state: tauri::State<'_, AppState>,
+) -> Result<ChannelMessage, String> {
+    state
+        .channels_store
+        .delete_channel_message(&channel, &target_id, from)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Append-only reaction toggle (count parity per sender) (#113).
+#[tauri::command]
+async fn react_channel_message(
+    channel: String,
+    target_id: String,
+    from: ChannelParticipant,
+    emoji: String,
+    state: tauri::State<'_, AppState>,
+) -> Result<ChannelMessage, String> {
+    state
+        .channels_store
+        .react_channel_message(&channel, &target_id, from, emoji)
+        .await
+        .map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 async fn send_dm(
     from: ChannelParticipant,
@@ -849,6 +896,53 @@ async fn read_dm_messages(
     state
         .channels_store
         .read_dm_messages(&a, &b, limit)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn edit_dm_message(
+    a: ChannelParticipant,
+    b: ChannelParticipant,
+    target_id: String,
+    from: ChannelParticipant,
+    new_body: String,
+    state: tauri::State<'_, AppState>,
+) -> Result<ChannelMessage, String> {
+    state
+        .channels_store
+        .edit_dm_message(&a, &b, &target_id, from, new_body)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn delete_dm_message(
+    a: ChannelParticipant,
+    b: ChannelParticipant,
+    target_id: String,
+    from: ChannelParticipant,
+    state: tauri::State<'_, AppState>,
+) -> Result<ChannelMessage, String> {
+    state
+        .channels_store
+        .delete_dm_message(&a, &b, &target_id, from)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn react_dm_message(
+    a: ChannelParticipant,
+    b: ChannelParticipant,
+    target_id: String,
+    from: ChannelParticipant,
+    emoji: String,
+    state: tauri::State<'_, AppState>,
+) -> Result<ChannelMessage, String> {
+    state
+        .channels_store
+        .react_dm_message(&a, &b, &target_id, from, emoji)
         .await
         .map_err(|e| e.to_string())
 }
@@ -1551,8 +1645,14 @@ pub fn run() {
             leave_channel,
             send_channel_message,
             read_channel_messages,
+            edit_channel_message,
+            delete_channel_message,
+            react_channel_message,
             send_dm,
             read_dm_messages,
+            edit_dm_message,
+            delete_dm_message,
+            react_dm_message,
             list_dm_pairs,
             get_read_state,
             save_read_state,

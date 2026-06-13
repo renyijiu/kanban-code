@@ -3,10 +3,17 @@ import { invoke } from "@tauri-apps/api/core";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { open as openPath } from "@tauri-apps/plugin-shell";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
-import { useChannelsStore } from "../store/channelsStore";
+import { useChannelsStore, SELF } from "../store/channelsStore";
 import { useBoardStore } from "../store/boardStore";
 import { useTheme, t } from "../theme";
-import type { Channel, ChannelMessage } from "../types";
+import type { Channel, ChannelMember } from "../types";
+import {
+  collapseMessages,
+  tokenizeBody,
+  type RenderedMessage,
+} from "../lib/messageCollapse";
+
+const REACTION_PICKER: readonly string[] = ["👍", "❤️", "😄", "🎉", "😢", "😮", "🙏"];
 
 const IMAGE_EXTS = ["png", "jpg", "jpeg", "gif", "webp", "bmp", "svg"];
 
@@ -56,6 +63,9 @@ export default function Channels() {
     init,
     selectChannel,
     sendMessage,
+    editMessage,
+    deleteMessage,
+    reactMessage,
     createChannel,
     saveDraft,
     unreadCount,
@@ -162,9 +172,12 @@ export default function Channels() {
         {selected ? (
           <ChannelPane
             channel={selected}
-            messages={messages}
+            rawMessages={messages}
             draft={draft}
             onSend={(body, imagePaths) => sendMessage(selected.name, body, imagePaths)}
+            onEdit={(id, body) => editMessage(selected.name, id, body)}
+            onDelete={(id) => deleteMessage(selected.name, id)}
+            onReact={(id, emoji) => reactMessage(selected.name, id, emoji)}
             onDraftChange={(body) => saveDraft(selected.name, body)}
             c={c}
             theme={theme}
@@ -258,17 +271,23 @@ function ChannelRow({
 
 function ChannelPane({
   channel,
-  messages,
+  rawMessages,
   draft,
   onSend,
+  onEdit,
+  onDelete,
+  onReact,
   onDraftChange,
   c,
   theme,
 }: {
   channel: Channel;
-  messages: ChannelMessage[];
+  rawMessages: import("../types").ChannelMessage[];
   draft: string;
   onSend: (body: string, imagePaths?: string[]) => void;
+  onEdit: (id: string, body: string) => void;
+  onDelete: (id: string) => void;
+  onReact: (id: string, emoji: string) => void;
   onDraftChange: (body: string) => void;
   c: ReturnType<typeof t>;
   theme: "dark" | "light";
@@ -278,6 +297,8 @@ function ChannelPane({
   const lastSeenRef = useRef<number>(0);
   const [attachments, setAttachments] = useState<string[]>([]);
   const [isDragHover, setIsDragHover] = useState(false);
+
+  const messages = useMemo(() => collapseMessages(rawMessages), [rawMessages]);
 
   // Auto-scroll to bottom when new messages arrive (only if user was at bottom).
   useEffect(() => {
@@ -403,7 +424,17 @@ function ChannelPane({
             No messages yet. Say hi.
           </div>
         ) : (
-          messages.map((m) => <MessageRow key={m.id} message={m} c={c} />)
+          messages.map((m) => (
+            <MessageRow
+              key={m.id}
+              message={m}
+              isOwn={m.from.handle === SELF.handle && (m.from.cardId ?? null) === (SELF.cardId ?? null)}
+              onEdit={(body) => onEdit(m.id, body)}
+              onDelete={() => onDelete(m.id)}
+              onReact={(emoji) => onReact(m.id, emoji)}
+              c={c}
+            />
+          ))
         )}
       </div>
 
@@ -449,25 +480,14 @@ function ChannelPane({
               />
             </svg>
           </button>
-          <textarea
+          <MentionTextarea
             value={draft}
-            onChange={(e) => onDraftChange(e.target.value)}
+            onChange={onDraftChange}
             onPaste={handlePaste}
-            onKeyDown={(e) => {
-              if (e.key === "Enter" && !e.shiftKey) {
-                e.preventDefault();
-                submitSend();
-              }
-            }}
+            onSubmit={submitSend}
+            members={channel.members}
             placeholder={`Message #${channel.name}`}
-            rows={1}
-            className="flex-1 resize-none rounded-lg px-3 py-2 text-[13px] focus:outline-none"
-            style={{
-              background: c.bgInput,
-              border: `1px solid ${c.border}`,
-              color: c.text,
-              maxHeight: 160,
-            }}
+            c={c}
           />
           <button
             type="submit"
@@ -488,6 +508,156 @@ function ChannelPane({
           add theme-specific message rendering without changing call sites. */}
       <span style={{ display: "none" }}>{theme}</span>
     </>
+  );
+}
+
+function MentionTextarea({
+  value,
+  onChange,
+  onPaste,
+  onSubmit,
+  members,
+  placeholder,
+  c,
+}: {
+  value: string;
+  onChange: (next: string) => void;
+  onPaste: (e: React.ClipboardEvent<HTMLTextAreaElement>) => void;
+  onSubmit: () => void;
+  members: ChannelMember[];
+  placeholder: string;
+  c: ReturnType<typeof t>;
+}) {
+  const taRef = useRef<HTMLTextAreaElement | null>(null);
+  const [mentionQuery, setMentionQuery] = useState<{ start: number; query: string } | null>(null);
+  const [highlightIdx, setHighlightIdx] = useState(0);
+
+  const candidates = useMemo(() => {
+    if (!mentionQuery) return [];
+    const q = mentionQuery.query.toLowerCase();
+    return members
+      .map((m) => m.handle)
+      .filter((h, i, arr) => arr.indexOf(h) === i)
+      .filter((h) => h.toLowerCase().startsWith(q))
+      .slice(0, 6);
+  }, [mentionQuery, members]);
+
+  useEffect(() => { setHighlightIdx(0); }, [mentionQuery?.query]);
+
+  const detectMention = (newValue: string, caret: number) => {
+    // Walk back from caret looking for `@`; bail at whitespace or BOS.
+    let i = caret - 1;
+    while (i >= 0) {
+      const ch = newValue[i];
+      if (ch === "@") {
+        if (i === 0 || /\s/.test(newValue[i - 1])) {
+          setMentionQuery({ start: i, query: newValue.slice(i + 1, caret) });
+          return;
+        }
+        break;
+      }
+      if (/\s/.test(ch)) break;
+      i--;
+    }
+    setMentionQuery(null);
+  };
+
+  const handleChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
+    onChange(e.target.value);
+    detectMention(e.target.value, e.target.selectionStart);
+  };
+
+  const acceptMention = (handle: string) => {
+    const ta = taRef.current;
+    if (!ta || !mentionQuery) return;
+    const before = value.slice(0, mentionQuery.start);
+    const after = value.slice(ta.selectionStart);
+    const insertion = `@${handle} `;
+    const next = before + insertion + after;
+    onChange(next);
+    setMentionQuery(null);
+    const caretAfter = before.length + insertion.length;
+    queueMicrotask(() => {
+      ta.focus();
+      ta.setSelectionRange(caretAfter, caretAfter);
+    });
+  };
+
+  const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    if (mentionQuery && candidates.length > 0) {
+      if (e.key === "ArrowDown") {
+        e.preventDefault();
+        setHighlightIdx((i) => (i + 1) % candidates.length);
+        return;
+      }
+      if (e.key === "ArrowUp") {
+        e.preventDefault();
+        setHighlightIdx((i) => (i - 1 + candidates.length) % candidates.length);
+        return;
+      }
+      if (e.key === "Enter" || e.key === "Tab") {
+        e.preventDefault();
+        acceptMention(candidates[highlightIdx]);
+        return;
+      }
+      if (e.key === "Escape") {
+        e.preventDefault();
+        setMentionQuery(null);
+        return;
+      }
+    }
+    if (e.key === "Enter" && !e.shiftKey) {
+      e.preventDefault();
+      onSubmit();
+    }
+  };
+
+  return (
+    <div className="flex-1 relative">
+      <textarea
+        ref={taRef}
+        value={value}
+        onChange={handleChange}
+        onPaste={onPaste}
+        onKeyDown={handleKeyDown}
+        onSelect={(e) => detectMention(value, e.currentTarget.selectionStart)}
+        onBlur={() => setMentionQuery(null)}
+        placeholder={placeholder}
+        rows={1}
+        className="w-full resize-none rounded-lg px-3 py-2 text-[13px] focus:outline-none"
+        style={{
+          background: c.bgInput,
+          border: `1px solid ${c.border}`,
+          color: c.text,
+          maxHeight: 160,
+        }}
+      />
+      {mentionQuery && candidates.length > 0 && (
+        <ul
+          className="absolute left-0 bottom-full mb-1 z-20 min-w-[160px] py-1 rounded-lg overflow-hidden"
+          style={{
+            background: c.bgDialog,
+            border: `1px solid ${c.border}`,
+            boxShadow: "0 8px 24px rgba(0,0,0,0.25)",
+          }}
+        >
+          {candidates.map((h, i) => (
+            <li
+              key={h}
+              onMouseDown={(e) => { e.preventDefault(); acceptMention(h); }}
+              onMouseEnter={() => setHighlightIdx(i)}
+              className="px-3 py-1 text-[13px] cursor-pointer"
+              style={{
+                background: i === highlightIdx ? c.hoverBg : "transparent",
+                color: c.textPrimary,
+              }}
+            >
+              @{h}
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
   );
 }
 
@@ -537,12 +707,32 @@ function AttachmentThumb({
 
 // ── Single message row ──────────────────────────────────────────────────────
 
-function MessageRow({ message, c }: { message: ChannelMessage; c: ReturnType<typeof t> }) {
+function MessageRow({
+  message,
+  isOwn,
+  onEdit,
+  onDelete,
+  onReact,
+  c,
+}: {
+  message: RenderedMessage;
+  isOwn: boolean;
+  onEdit: (body: string) => void;
+  onDelete: () => void;
+  onReact: (emoji: string) => void;
+  c: ReturnType<typeof t>;
+}) {
   const ts = new Date(message.ts).toLocaleTimeString([], {
     hour: "2-digit",
     minute: "2-digit",
   });
-  const isSystem = message.type === "join" || message.type === "leave" || message.type === "system";
+  const [hover, setHover] = useState(false);
+  const [editing, setEditing] = useState(false);
+  const [editDraft, setEditDraft] = useState(message.body);
+  const [reactionPickerOpen, setReactionPickerOpen] = useState(false);
+
+  const isSystem =
+    message.type === "join" || message.type === "leave" || message.type === "system";
   if (isSystem) {
     return (
       <div className="text-center text-[11px]" style={{ color: c.textMuted }}>
@@ -550,8 +740,32 @@ function MessageRow({ message, c }: { message: ChannelMessage; c: ReturnType<typ
       </div>
     );
   }
+
+  if (message.deleted) {
+    return (
+      <div className="flex items-baseline gap-2 italic text-[12px]" style={{ color: c.textMuted }}>
+        <span>@{message.from.handle}</span>
+        <span className="text-[10px]">{ts}</span>
+        <span>(message deleted)</span>
+      </div>
+    );
+  }
+
+  const bodyTokens = tokenizeBody(message.body);
+
+  const submitEdit = () => {
+    const next = editDraft.trim();
+    if (next && next !== message.body) onEdit(next);
+    setEditing(false);
+  };
+
   return (
-    <div>
+    <div
+      className="group relative -mx-2 px-2 py-0.5 rounded"
+      onMouseEnter={() => setHover(true)}
+      onMouseLeave={() => { setHover(false); setReactionPickerOpen(false); }}
+      style={{ background: hover ? c.hoverBg : "transparent" }}
+    >
       <div className="flex items-baseline gap-2">
         <span className="text-[13px] font-semibold shrink-0" style={{ color: c.textPrimary }}>
           @{message.from.handle}
@@ -559,16 +773,154 @@ function MessageRow({ message, c }: { message: ChannelMessage; c: ReturnType<typ
         <span className="text-[10px] shrink-0" style={{ color: c.textMuted }}>
           {ts}
         </span>
-        {message.body && (
+        {message.edited && !editing && (
+          <span className="text-[10px] shrink-0" style={{ color: c.textMuted }} title="edited">
+            (edited)
+          </span>
+        )}
+        {!editing && message.body && (
           <span className="text-[13px] whitespace-pre-wrap break-words" style={{ color: c.text }}>
-            {message.body}
+            {bodyTokens.map((tok, i) =>
+              tok.kind === "text" ? (
+                <span key={i}>{tok.value}</span>
+              ) : (
+                <span key={i} className="font-semibold" style={{ color: "#4f8ef7" }}>
+                  @{tok.handle}
+                </span>
+              )
+            )}
           </span>
         )}
       </div>
+
+      {editing && (
+        <div className="mt-1 flex items-end gap-2">
+          <textarea
+            autoFocus
+            value={editDraft}
+            onChange={(e) => setEditDraft(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" && !e.shiftKey) {
+                e.preventDefault();
+                submitEdit();
+              } else if (e.key === "Escape") {
+                setEditing(false);
+                setEditDraft(message.body);
+              }
+            }}
+            rows={1}
+            className="flex-1 resize-none rounded px-2 py-1 text-[13px] focus:outline-none"
+            style={{
+              background: c.bgInput,
+              border: `1px solid ${c.border}`,
+              color: c.text,
+              maxHeight: 160,
+            }}
+          />
+          <button
+            type="button"
+            onClick={submitEdit}
+            className="px-2 py-1 rounded text-[12px] font-semibold"
+            style={{ background: "#4f8ef7", color: "white" }}
+          >
+            Save
+          </button>
+          <button
+            type="button"
+            onClick={() => { setEditing(false); setEditDraft(message.body); }}
+            className="px-2 py-1 rounded text-[12px]"
+            style={{ background: c.bgInput, color: c.textSecondary, border: `1px solid ${c.border}` }}
+          >
+            Cancel
+          </button>
+        </div>
+      )}
+
       {message.imagePaths && message.imagePaths.length > 0 && (
         <div className="flex flex-wrap gap-2 mt-1 ml-1">
           {message.imagePaths.map((p, i) => (
             <MessageImage key={`${p}-${i}`} path={p} c={c} />
+          ))}
+        </div>
+      )}
+
+      {message.reactions.length > 0 && (
+        <div className="flex flex-wrap gap-1 mt-1 ml-1">
+          {message.reactions.map((r) => (
+            <button
+              key={r.emoji}
+              type="button"
+              onClick={() => onReact(r.emoji)}
+              className="px-1.5 py-0.5 rounded-full text-[11px]"
+              style={{
+                background: r.handles.includes(SELF.handle) ? "rgba(79,142,247,0.18)" : c.bgInput,
+                border: `1px solid ${r.handles.includes(SELF.handle) ? "#4f8ef7" : c.border}`,
+                color: c.textPrimary,
+              }}
+              title={r.handles.map((h) => `@${h}`).join(", ")}
+            >
+              {r.emoji} {r.handles.length}
+            </button>
+          ))}
+        </div>
+      )}
+
+      {hover && !editing && (
+        <div
+          className="absolute -top-3 right-2 flex items-center gap-1 rounded-md px-1 py-0.5"
+          style={{ background: c.bgDialog, border: `1px solid ${c.border}` }}
+        >
+          <button
+            type="button"
+            onClick={() => setReactionPickerOpen((v) => !v)}
+            className="px-1.5 text-[12px]"
+            style={{ color: c.textSecondary }}
+            title="React"
+          >
+            😀
+          </button>
+          {isOwn && (
+            <>
+              <button
+                type="button"
+                onClick={() => { setEditing(true); setEditDraft(message.body); }}
+                className="px-1.5 text-[11px]"
+                style={{ color: c.textSecondary }}
+                title="Edit"
+              >
+                Edit
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  if (window.confirm("Delete this message?")) onDelete();
+                }}
+                className="px-1.5 text-[11px]"
+                style={{ color: "#f85149" }}
+                title="Delete"
+              >
+                Delete
+              </button>
+            </>
+          )}
+        </div>
+      )}
+
+      {reactionPickerOpen && (
+        <div
+          className="absolute top-3 right-2 z-10 flex items-center gap-1 rounded-md px-1 py-1"
+          style={{ background: c.bgDialog, border: `1px solid ${c.border}` }}
+        >
+          {REACTION_PICKER.map((emoji) => (
+            <button
+              key={emoji}
+              type="button"
+              onClick={() => { onReact(emoji); setReactionPickerOpen(false); }}
+              className="px-1 text-[14px]"
+              title={emoji}
+            >
+              {emoji}
+            </button>
           ))}
         </div>
       )}

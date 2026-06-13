@@ -33,6 +33,9 @@ interface ChannelsStore {
   selectChannel: (name: string | null) => Promise<void>;
   loadMessages: (name: string) => Promise<void>;
   sendMessage: (name: string, body: string, imagePaths?: string[]) => Promise<void>;
+  editMessage: (name: string, targetId: string, newBody: string) => Promise<void>;
+  deleteMessage: (name: string, targetId: string) => Promise<void>;
+  reactMessage: (name: string, targetId: string, emoji: string) => Promise<void>;
   createChannel: (name: string) => Promise<Channel | null>;
   deleteChannel: (name: string) => Promise<void>;
   saveDraft: (name: string, body: string) => Promise<void>;
@@ -198,6 +201,48 @@ export const useChannelsStore = create<ChannelsStore>((set, get) => ({
     }
   },
 
+  editMessage: async (name, targetId, newBody) => {
+    const trimmed = newBody.trim();
+    if (!trimmed) return;
+    try {
+      await invoke<ChannelMessage>("edit_channel_message", {
+        channel: name,
+        targetId,
+        from: SELF,
+        newBody: trimmed,
+      });
+      // Watcher will trigger refetch — no optimistic update for edits since
+      // the collapse pipeline owns the body.
+    } catch (e) {
+      set({ error: String(e) });
+    }
+  },
+
+  deleteMessage: async (name, targetId) => {
+    try {
+      await invoke<ChannelMessage>("delete_channel_message", {
+        channel: name,
+        targetId,
+        from: SELF,
+      });
+    } catch (e) {
+      set({ error: String(e) });
+    }
+  },
+
+  reactMessage: async (name, targetId, emoji) => {
+    try {
+      await invoke<ChannelMessage>("react_channel_message", {
+        channel: name,
+        targetId,
+        from: SELF,
+        emoji,
+      });
+    } catch (e) {
+      set({ error: String(e) });
+    }
+  },
+
   createChannel: async (rawName) => {
     // Mirror Rust's normalize_channel_name: trim → strip leading '#' → trim
     // again → lowercase. The second trim catches "# foo" → "foo" rather than
@@ -250,9 +295,12 @@ export const useChannelsStore = create<ChannelsStore>((set, get) => ({
   },
 
   markRead: async (name) => {
-    const msgs = get().messagesByChannel[name] ?? [];
-    if (msgs.length === 0) return;
-    const lastId = msgs[msgs.length - 1].id;
+    // Read-state pins to the latest "real" message id (not edit/delete/
+    // reaction rows) so unreadCount doesn't get inflated by side-channel
+    // activity on already-read messages.
+    const visible = (get().messagesByChannel[name] ?? []).filter(isVisibleRow);
+    if (visible.length === 0) return;
+    const lastId = visible[visible.length - 1].id;
     if (get().readState.channels[name] === lastId) return;
     const newReadState: ChannelReadState = {
       ...get().readState,
@@ -269,12 +317,17 @@ export const useChannelsStore = create<ChannelsStore>((set, get) => ({
   clearError: () => set({ error: null }),
 
   unreadCount: (name) => {
-    const msgs = get().messagesByChannel[name] ?? [];
-    if (msgs.length === 0) return 0;
+    const visible = (get().messagesByChannel[name] ?? []).filter(isVisibleRow);
+    if (visible.length === 0) return 0;
     const lastReadId = get().readState.channels[name];
-    if (!lastReadId) return msgs.length;
-    const idx = msgs.findIndex((m) => m.id === lastReadId);
-    if (idx < 0) return msgs.length;
-    return msgs.length - 1 - idx;
+    if (!lastReadId) return visible.length;
+    const idx = visible.findIndex((m) => m.id === lastReadId);
+    if (idx < 0) return visible.length;
+    return visible.length - 1 - idx;
   },
 }));
+
+function isVisibleRow(m: ChannelMessage): boolean {
+  const k = m.type ?? "message";
+  return k === "message" || k === "join" || k === "leave" || k === "system";
+}
