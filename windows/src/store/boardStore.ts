@@ -357,6 +357,13 @@ export async function createWorktree(repoRoot: string, name: string): Promise<Wo
   return invoke<WorktreeInfo>("create_worktree", { repoRoot, name });
 }
 
+export async function moveCardToProject(
+  cardId: string,
+  targetProjectPath: string
+): Promise<void> {
+  return invoke("move_card_to_project", { cardId, targetProjectPath });
+}
+
 export async function removeWorktree(
   path: string,
   repoRoot: string | null,

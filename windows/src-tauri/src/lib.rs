@@ -13,6 +13,7 @@ mod logging;
 mod pushover;
 mod session_ops;
 mod session_discovery;
+mod session_mover;
 mod settings_store;
 mod shell_command;
 mod transcript_reader;
@@ -422,6 +423,64 @@ async fn fork_session(session_path: String, target_dir: Option<String>) -> Resul
 #[tauri::command]
 async fn truncate_session(session_path: String, turn_count: usize) -> Result<(), String> {
     session_ops::truncate_session(&session_path, turn_count)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn move_card_to_project(
+    card_id: String,
+    target_project_path: String,
+    state: tauri::State<'_, AppState>,
+) -> Result<(), String> {
+    let mut links = state
+        .coordination_store
+        .read_links()
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let idx = links
+        .iter()
+        .position(|l| l.id == card_id)
+        .ok_or_else(|| format!("card {card_id} not found"))?;
+
+    let (session_id, session_path) = match links[idx].session_link.as_ref() {
+        Some(sl) => (sl.session_id.clone(), sl.session_path.clone()),
+        None => (String::new(), None),
+    };
+
+    // If the card has a session jsonl, rewrite it into the target project's
+    // encoded directory and update `cwd` in every line so macOS/CLI find it.
+    let new_session_path = if let Some(path) = session_path {
+        if !session_id.is_empty() {
+            match session_mover::move_session(&session_id, &path, &target_project_path).await {
+                Ok(new_path) => Some(new_path),
+                Err(e) => {
+                    logging::warn(
+                        "move-card",
+                        &format!("failed to move session jsonl for {card_id}: {e}"),
+                    );
+                    // Continue anyway — the link metadata still gets updated.
+                    None
+                }
+            }
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    let link = &mut links[idx];
+    link.project_path = Some(target_project_path);
+    if let (Some(sl), Some(new_path)) = (link.session_link.as_mut(), new_session_path) {
+        sl.session_path = Some(new_path);
+    }
+    link.updated_at = chrono::Utc::now();
+
+    state
+        .coordination_store
+        .write_links(&links)
         .await
         .map_err(|e| e.to_string())
 }
@@ -1042,6 +1101,7 @@ pub fn run() {
             fork_session,
             truncate_session,
             discover_projects,
+            move_card_to_project,
         ])
         .setup(|app| {
             logging::info(
