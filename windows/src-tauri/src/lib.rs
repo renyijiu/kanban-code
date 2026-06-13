@@ -4,6 +4,7 @@ mod board_state;
 mod card_reconciler;
 mod coordination_store;
 mod gh_cli;
+mod git_remote;
 mod git_worktree;
 mod jsonl_parser;
 mod ksuid;
@@ -328,6 +329,29 @@ async fn gh_is_authed() -> bool {
         .await
         .map(|s| s.success())
         .unwrap_or(false)
+}
+
+#[tauri::command]
+async fn resolve_github_base_url(project_path: String) -> Result<Option<String>, String> {
+    Ok(git_remote::github_base_url(&project_path).await)
+}
+
+#[tauri::command]
+async fn open_github_pr(project_path: String, number: i64) -> Result<(), String> {
+    let base = git_remote::github_base_url(&project_path)
+        .await
+        .ok_or_else(|| format!("no GitHub remote for {project_path}"))?;
+    shell_command::open_url(&git_remote::pr_url(&base, number)).await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn open_github_issue(project_path: String, number: i64) -> Result<(), String> {
+    let base = git_remote::github_base_url(&project_path)
+        .await
+        .ok_or_else(|| format!("no GitHub remote for {project_path}"))?;
+    shell_command::open_url(&git_remote::issue_url(&base, number)).await
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -779,6 +803,9 @@ pub fn run() {
             remove_queued_prompt,
             search_transcript,
             check_dependencies,
+            resolve_github_base_url,
+            open_github_pr,
+            open_github_issue,
         ])
         .setup(|app| {
             logging::info(

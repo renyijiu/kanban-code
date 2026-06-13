@@ -307,3 +307,15 @@ export async function searchTranscript(
 ): Promise<number[]> {
   return invoke<number[]>("search_transcript", { sessionId, query });
 }
+
+export async function resolveGithubBaseUrl(projectPath: string): Promise<string | null> {
+  return invoke<string | null>("resolve_github_base_url", { projectPath });
+}
+
+export async function openGithubPr(projectPath: string, number: number): Promise<void> {
+  return invoke("open_github_pr", { projectPath, number });
+}
+
+export async function openGithubIssue(projectPath: string, number: number): Promise<void> {
+  return invoke("open_github_issue", { projectPath, number });
+}
