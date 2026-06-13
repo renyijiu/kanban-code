@@ -9,6 +9,7 @@ mod git_worktree;
 mod jsonl_parser;
 mod ksuid;
 mod logging;
+mod pushover;
 mod session_discovery;
 mod settings_store;
 mod shell_command;
@@ -499,38 +500,76 @@ fn start_polling(app: tauri::AppHandle) {
 
                 // Send OS notifications for cards where Claude just finished a turn
                 if !notify_cards.is_empty() {
-                    let settings_ok = state
-                        .settings_store
-                        .read()
-                        .await
+                    let settings = state.settings_store.read().await.ok();
+                    let os_enabled = settings
+                        .as_ref()
                         .map(|s| s.notifications.notifications_enabled)
                         .unwrap_or(true);
-                    if settings_ok {
+                    let push_cfg = settings.and_then(|s| {
+                        if s.notifications.pushover_enabled {
+                            Some((
+                                s.notifications.pushover_token.clone(),
+                                s.notifications.pushover_user_key.clone(),
+                            ))
+                        } else {
+                            None
+                        }
+                    });
+
+                    if os_enabled || push_cfg.is_some() {
                         logging::info(
                             "notify",
-                            &format!("sending {} notification(s)", notify_cards.len()),
+                            &format!("dispatching {} notification(s)", notify_cards.len()),
                         );
-                        for card in notify_cards {
-                            let title = card.display_title.clone();
-                            // Prefer the last assistant message as the body so
-                            // the notification actually says something useful
-                            // (matches macOS TranscriptNotificationReader).
-                            // Fall back to a generic prompt when the JSONL
-                            // can't be read or the turn has no text content.
-                            let body = match card
-                                .link
-                                .session_link
-                                .as_ref()
-                                .and_then(|sl| sl.session_path.clone())
-                            {
-                                Some(p) => transcript_reader::read_last_assistant_message(&p, 240)
-                                    .await
-                                    .unwrap_or_else(|| {
-                                        "Claude finished — your input is needed.".to_string()
-                                    }),
-                                None => "Claude finished — your input is needed.".to_string(),
-                            };
-                            let _ = app.notification().builder().title(title).body(body).show();
+                    }
+
+                    for card in notify_cards {
+                        let title = card.display_title.clone();
+                        // Prefer the last assistant message as the body so
+                        // the notification actually says something useful
+                        // (matches macOS TranscriptNotificationReader).
+                        // Fall back to a generic prompt when the JSONL
+                        // can't be read or the turn has no text content.
+                        let body = match card
+                            .link
+                            .session_link
+                            .as_ref()
+                            .and_then(|sl| sl.session_path.clone())
+                        {
+                            Some(p) => transcript_reader::read_last_assistant_message(&p, 240)
+                                .await
+                                .unwrap_or_else(|| {
+                                    "Claude finished — your input is needed.".to_string()
+                                }),
+                            None => "Claude finished — your input is needed.".to_string(),
+                        };
+
+                        if os_enabled {
+                            let _ = app
+                                .notification()
+                                .builder()
+                                .title(title.clone())
+                                .body(body.clone())
+                                .show();
+                        }
+                        if let Some((Some(token), Some(user))) = push_cfg.as_ref().map(|(t, u)| (t.clone(), u.clone())) {
+                            // Fire-and-forget — Pushover is best-effort and
+                            // shouldn't block the polling loop on network I/O.
+                            let card_id = card.id.clone();
+                            let t = title.clone();
+                            let b = body.clone();
+                            tokio::spawn(async move {
+                                match pushover::send(&token, &user, &t, &b, Some(&card_id)).await {
+                                    Ok(()) => logging::info(
+                                        "pushover",
+                                        &format!("sent for card {card_id}"),
+                                    ),
+                                    Err(e) => logging::warn(
+                                        "pushover",
+                                        &format!("send failed for card {card_id}: {e}"),
+                                    ),
+                                }
+                            });
                         }
                     }
                 }
