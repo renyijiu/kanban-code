@@ -23,6 +23,7 @@ import type { Turn, TranscriptPage, QueuedPrompt } from "../types";
 import TerminalView from "./Terminal";
 import QueuedPromptDialog from "./QueuedPromptDialog";
 import QueuedPromptsBar from "./QueuedPromptsBar";
+import LaunchConfirmationDialog, { type LaunchFlags } from "./LaunchConfirmationDialog";
 
 type Tab = "terminal" | "history" | "issue" | "pr" | "prompt";
 
@@ -65,6 +66,14 @@ export default function CardDetailView() {
   // tmux server keeps Claude running) and reopening reattaches with the
   // pane scrollback intact. When false, the legacy one-shot PTY is used.
   const [tmuxAvailable, setTmuxAvailable] = useState(false);
+
+  // Launch confirmation: when a fresh-launch card opens its terminal tab, we
+  // show LaunchConfirmationDialog first so the user can tweak the prompt,
+  // toggle --dangerously-skip-permissions, prepend env vars, or hand-edit the
+  // command. Resolved flags drive the inner-command builder below. Resumes
+  // bypass the dialog (no command to choose — `claude --resume <id>`).
+  const [showLaunchDialog, setShowLaunchDialog] = useState(false);
+  const [launchFlags, setLaunchFlags] = useState<LaunchFlags | null>(null);
 
   // Multi-tab state: each tab is a tmux window inside the card's session.
   // Window 1 is the "Claude" tab created by Step 2's session-wrap; extra
@@ -296,24 +305,62 @@ export default function CardDetailView() {
   // tmux requires a Unix shell AND a working `tmux -V` inside it.
   const useTmux = isUnixShell && tmuxAvailable;
 
+  // Effective prompt + flags after the launch dialog (if shown). For resumes,
+  // the dialog is skipped — launchFlags stays null and the dialog defaults
+  // apply (no skip-perm, no env prefix). The same builder also feeds the
+  // dialog's live preview so what the user sees is what runs.
+  const effectivePrompt = launchFlags?.prompt ?? promptBody ?? "";
+  const effectiveSkipPerm = launchFlags?.dangerouslySkipPermissions ?? false;
+  const effectiveEnv = launchFlags?.envPrefix ?? [];
+
+  const buildInnerBashCmd = useCallback(
+    (
+      cwd: string | undefined,
+      sid: string | null,
+      prompt: string,
+      skipPerm: boolean,
+      env: string[],
+    ) => {
+      const envPrefix = env.length > 0 ? env.join(" ") + " " : "";
+      const cdCmd = cwd ? `cd ${cwd.replace(/ /g, "\\ ")} && ` : "";
+      const skipFlag = skipPerm ? " --dangerously-skip-permissions" : "";
+      return sid
+        ? `${cdCmd}${envPrefix}claude --resume ${sid}${skipFlag}`
+        : `${cdCmd}${envPrefix}claude${skipFlag} '${prompt.replace(/'/g, "'\\''")}'`;
+    },
+    [],
+  );
+
+  const buildInnerCmdShellCmd = useCallback(
+    (
+      cwd: string | undefined,
+      sid: string | null,
+      prompt: string,
+      skipPerm: boolean,
+      env: string[],
+    ) => {
+      // `set VAR=val&&` chains in cmd.exe; pwsh accepts `$env:VAR='val';`,
+      // but cmd is the default — stick with set-style.
+      const envPrefix = env.length > 0 ? env.map((kv) => `set ${kv}&& `).join("") : "";
+      const cdCmd = cwd ? `cd "${cwd}" && ` : "";
+      const skipFlag = skipPerm ? " --dangerously-skip-permissions" : "";
+      return sid
+        ? `${cdCmd}${envPrefix}claude --resume ${sid}${skipFlag}`
+        : `${cdCmd}${envPrefix}claude${skipFlag} "${prompt.replace(/"/g, '""')}"`;
+    },
+    [],
+  );
+
   // The inner bash command (`cd … && claude …`) — same for tmux + legacy
   // paths. Inside tmux it's the one-shot session-creation command; outside,
   // it's typed by Terminal.tsx after 800ms.
-  const innerBashCmd = (() => {
-    const cdCmd = projectPath ? `cd ${projectPath.replace(/ /g, "\\ ")} && ` : "";
-    return sessionId
-      ? `${cdCmd}claude --resume ${sessionId}`
-      : `${cdCmd}claude '${(promptBody ?? "").replace(/'/g, "'\\''")}'`;
-  })();
+  const innerBashCmd =
+    launchFlags?.commandOverride ??
+    buildInnerBashCmd(projectPath ?? undefined, sessionId ?? null, effectivePrompt, effectiveSkipPerm, effectiveEnv);
 
-  // Equivalent for native Windows shells (cmd / pwsh) — paths in double
-  // quotes, prompt double-quoted with `""` escaping.
-  const innerCmdShellCmd = (() => {
-    const cdCmd = projectPath ? `cd "${projectPath}" && ` : "";
-    return sessionId
-      ? `${cdCmd}claude --resume ${sessionId}`
-      : `${cdCmd}claude "${(promptBody ?? "").replace(/"/g, '""')}"`;
-  })();
+  const innerCmdShellCmd =
+    launchFlags?.commandOverride ??
+    buildInnerCmdShellCmd(projectPath ?? undefined, sessionId ?? null, effectivePrompt, effectiveSkipPerm, effectiveEnv);
 
   // Build the actual argv handed to the PTY + the optional post-spawn
   // type-this-after-800ms string.
@@ -490,14 +537,23 @@ export default function CardDetailView() {
   };
 
   const handleStartTerminal = () => {
-    setTerminalActive(true);
+    // Resumes — no choices to make, jump straight in.
+    if (sessionId) {
+      setTerminalActive(true);
+      setActiveTab("terminal");
+      return;
+    }
+    // Fresh launch — let the user review the command first.
+    setShowLaunchDialog(true);
     setActiveTab("terminal");
   };
 
-  // Auto-start terminal for freshly created tasks
+  // Auto-open the launch dialog for freshly created tasks so the user sees
+  // the command preview before Claude starts churning. They can cancel out.
   useEffect(() => {
-    if (!sessionId && promptBody && !terminalActive) {
-      handleStartTerminal();
+    if (!sessionId && promptBody && !terminalActive && !showLaunchDialog && !launchFlags) {
+      setShowLaunchDialog(true);
+      setActiveTab("terminal");
     }
   }, [card.id]);
 
@@ -952,6 +1008,27 @@ export default function CardDetailView() {
         editBody={editingPrompt?.body}
         editSendAuto={editingPrompt?.sendAutomatically}
       />
+
+      {/* Launch confirmation dialog (fresh launches only) */}
+      {showLaunchDialog && projectPath && (
+        <LaunchConfirmationDialog
+          projectPath={projectPath}
+          initialPrompt={promptBody ?? ""}
+          canCreateWorktree={false}
+          initialSkipPermissions={false}
+          buildCommand={(f) =>
+            isUnixShell
+              ? buildInnerBashCmd(projectPath, sessionId ?? null, f.prompt, f.dangerouslySkipPermissions, f.envPrefix)
+              : buildInnerCmdShellCmd(projectPath, sessionId ?? null, f.prompt, f.dangerouslySkipPermissions, f.envPrefix)
+          }
+          onLaunch={(flags) => {
+            setLaunchFlags(flags);
+            setShowLaunchDialog(false);
+            setTerminalActive(true);
+          }}
+          onCancel={() => setShowLaunchDialog(false)}
+        />
+      )}
     </div>
   );
 }
