@@ -268,6 +268,15 @@ function ClaudeCodeStep({
           <RecheckButton checking={checking} onRecheck={onRecheck} themeTokens={c} />
         </div>
       )}
+
+      <p className="text-[11px] leading-relaxed" style={{ color: c.textDim }}>
+        Using WSL? The embedded terminal defaults to{" "}
+        <code className="font-mono" style={{ color: c.textMuted }}>cmd.exe</code>.
+        If you installed Claude inside WSL, switch it to{" "}
+        <code className="font-mono" style={{ color: c.textMuted }}>wsl.exe</code>
+        {" "}in <span style={{ color: c.textSecondary }}>Settings → Terminal shell</span>
+        {" "}after onboarding.
+      </p>
     </div>
   );
 }
