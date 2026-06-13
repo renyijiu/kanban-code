@@ -7,10 +7,23 @@ import type {
   DependencyStatus,
   KanbanColumn,
   QueuedPrompt,
+  RemoteHostStatus,
+  RemotePrereqs,
   Session,
   Settings,
+  SyncStatus,
   TranscriptPage,
 } from "../types";
+
+export type BoardViewMode = "board" | "list";
+
+const VIEW_MODE_STORAGE_KEY = "kanban.boardViewMode";
+
+function loadViewMode(): BoardViewMode {
+  if (typeof window === "undefined") return "board";
+  const raw = window.localStorage.getItem(VIEW_MODE_STORAGE_KEY);
+  return raw === "list" ? "list" : "board";
+}
 
 interface BoardStore {
   // State
@@ -23,6 +36,11 @@ interface BoardStore {
   lastRefresh: string | null;
   error: string | null;
   selectedProjectPath: string | null;
+  syncStatus: SyncStatus;
+  viewMode: BoardViewMode;
+  /** Transient UI hint — set by BoardView during DnD to mark the card the
+   *  current drag would merge into. Cleared on drag end. */
+  mergeTargetId: string | null;
 
   // Actions
   refresh: () => Promise<void>;
@@ -36,12 +54,15 @@ interface BoardStore {
     prompt: string,
     title: string | null,
     project: string,
-    launch?: boolean
+    launch?: boolean,
+    assistantId?: string
   ) => Promise<string | null>;
   setSearchOpen: (open: boolean) => void;
   setSettingsOpen: (open: boolean) => void;
   setNewTaskOpen: (open: boolean) => void;
   setSelectedProject: (path: string | null) => void;
+  setViewMode: (mode: BoardViewMode) => void;
+  setMergeTargetId: (id: string | null) => void;
   clearError: () => void;
 
   // Computed helpers
@@ -58,7 +79,10 @@ export const useBoardStore = create<BoardStore>((set, get) => ({
   isLoading: false,
   lastRefresh: null,
   error: null,
+  syncStatus: { kind: "disabled", conflictCount: 0 },
   selectedProjectPath: null,
+  viewMode: loadViewMode(),
+  mergeTargetId: null,
 
   refresh: async () => {
     set({ isLoading: true, error: null });
@@ -154,9 +178,15 @@ export const useBoardStore = create<BoardStore>((set, get) => ({
     }
   },
 
-  createCard: async (prompt, title, project, launch = false) => {
+  createCard: async (prompt, title, project, launch = false, assistantId) => {
     try {
-      const link = await invoke<{ id: string }>("create_card", { prompt, title, project, launch });
+      const link = await invoke<{ id: string }>("create_card", {
+        prompt,
+        title,
+        project,
+        launch,
+        assistantId: assistantId ?? null,
+      });
       await get().refresh();
       return link.id;
     } catch (e) {
@@ -169,6 +199,13 @@ export const useBoardStore = create<BoardStore>((set, get) => ({
   setSettingsOpen: (open) => set({ settingsOpen: open }),
   setNewTaskOpen: (open) => set({ newTaskOpen: open }),
   setSelectedProject: (path) => set({ selectedProjectPath: path }),
+  setViewMode: (mode) => {
+    if (typeof window !== "undefined") {
+      window.localStorage.setItem(VIEW_MODE_STORAGE_KEY, mode);
+    }
+    set({ viewMode: mode });
+  },
+  setMergeTargetId: (id) => set({ mergeTargetId: id }),
   clearError: () => set({ error: null }),
 
   cardsInColumn: (column) => {
@@ -239,6 +276,14 @@ export function initBoardEventListener() {
       cards: event.payload.cards,
       lastRefresh: event.payload.lastRefresh ?? null,
     });
+  });
+  listen<SyncStatus>("sync_status_event", (event) => {
+    useBoardStore.setState({ syncStatus: event.payload });
+  });
+  listen<RemoteHostStatus>("remote_status_changed", (event) => {
+    // Surface as a non-blocking toast via the OS notification path the
+    // backend already owns — we just log here so the dev tools show it.
+    console.info("remote host status change", event.payload);
   });
 }
 
@@ -338,6 +383,35 @@ export async function createWorktree(repoRoot: string, name: string): Promise<Wo
   return invoke<WorktreeInfo>("create_worktree", { repoRoot, name });
 }
 
+export async function moveCardToProject(
+  cardId: string,
+  targetProjectPath: string
+): Promise<void> {
+  return invoke("move_card_to_project", { cardId, targetProjectPath });
+}
+
+export async function mergeCards(
+  sourceCardId: string,
+  targetCardId: string
+): Promise<void> {
+  return invoke("merge_cards", { sourceCardId, targetCardId });
+}
+
+/** Pure client-side preview of merge_ops.rs::merge_blocked, so the DnD
+ *  overlay only promises a merge the backend will accept. Keep in sync. */
+export function canMergeCards(source: CardDto, target: CardDto): boolean {
+  if (source.id === target.id) return false;
+  if (source.link.isLaunching || target.link.isLaunching) return false;
+  if (source.link.sessionLink && target.link.sessionLink) return false;
+  const sWt = source.link.worktreeLink;
+  const tWt = target.link.worktreeLink;
+  if (sWt && tWt && sWt.path !== tWt.path) return false;
+  const sIss = source.link.issueLink;
+  const tIss = target.link.issueLink;
+  if (sIss && tIss && sIss.number !== tIss.number) return false;
+  return true;
+}
+
 export async function removeWorktree(
   path: string,
   repoRoot: string | null,
@@ -359,4 +433,38 @@ export async function discoverProjects(): Promise<string[]> {
 /** Truncate a session .jsonl to keep only the first `turnCount` user/assistant turns. */
 export async function truncateSession(sessionPath: string, turnCount: number): Promise<void> {
   return invoke("truncate_session", { sessionPath, turnCount });
+}
+
+// ── Remote / sync (Phase 5) ──────────────────────────────────────────────────
+
+export async function remotePrereqs(): Promise<RemotePrereqs> {
+  return invoke<RemotePrereqs>("remote_prereqs");
+}
+
+export async function remoteDeployShell(): Promise<void> {
+  return invoke("remote_deploy_shell");
+}
+
+export async function mutagenStatus(): Promise<SyncStatus> {
+  return invoke<SyncStatus>("mutagen_status");
+}
+
+export async function mutagenRawStatus(): Promise<string> {
+  return invoke<string>("mutagen_raw_status");
+}
+
+export async function mutagenStart(): Promise<void> {
+  return invoke("mutagen_start");
+}
+
+export async function mutagenStop(): Promise<void> {
+  return invoke("mutagen_stop");
+}
+
+export async function mutagenReset(): Promise<void> {
+  return invoke("mutagen_reset");
+}
+
+export async function mutagenFlush(): Promise<void> {
+  return invoke("mutagen_flush");
 }

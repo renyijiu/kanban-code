@@ -3,6 +3,7 @@ mod assign_column;
 mod bm25;
 mod board_state;
 mod card_reconciler;
+mod coding_assistant;
 mod coordination_store;
 mod gh_cli;
 mod git_remote;
@@ -12,9 +13,14 @@ mod hook_manager;
 mod jsonl_parser;
 mod ksuid;
 mod logging;
+mod merge_ops;
+mod mutagen;
 mod pushover;
+mod remote_shell;
+mod remote_status;
 mod session_ops;
 mod session_discovery;
+mod session_mover;
 mod settings_store;
 mod shell_command;
 mod tmux;
@@ -89,11 +95,18 @@ async fn create_card(
     title: Option<String>,
     project: String,
     launch: Option<bool>,
+    assistant_id: Option<String>,
     state: tauri::State<'_, AppState>,
 ) -> Result<coordination_store::Link, String> {
+    let assistant = assistant_id
+        .as_deref()
+        .and_then(coding_assistant::AssistantId::from_str)
+        .unwrap_or_default()
+        .as_str()
+        .to_string();
     let link = state
         .coordination_store
-        .create_card(prompt.clone(), title, project.clone())
+        .create_card(prompt.clone(), title, project.clone(), assistant)
         .await
         .map_err(|e| e.to_string())?;
 
@@ -425,6 +438,139 @@ async fn fork_session(session_path: String, target_dir: Option<String>) -> Resul
 #[tauri::command]
 async fn truncate_session(session_path: String, turn_count: usize) -> Result<(), String> {
     session_ops::truncate_session(&session_path, turn_count)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Merge `source_card_id` into `target_card_id`. Source is deleted; target
+/// absorbs source's optional fields per the rules in [`merge_ops`].
+///
+/// No undo. Callers should confirm intent before invoking.
+#[tauri::command]
+async fn merge_cards(
+    source_card_id: String,
+    target_card_id: String,
+    state: tauri::State<'_, AppState>,
+) -> Result<(), String> {
+    let mut links = state
+        .coordination_store
+        .read_links()
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let source_idx = links
+        .iter()
+        .position(|l| l.id == source_card_id)
+        .ok_or_else(|| format!("source card {source_card_id} not found"))?;
+    let target_idx = links
+        .iter()
+        .position(|l| l.id == target_card_id)
+        .ok_or_else(|| format!("target card {target_card_id} not found"))?;
+
+    if let Some(reason) = merge_ops::merge_blocked(&links[source_idx], &links[target_idx]) {
+        return Err(reason);
+    }
+
+    // Snapshot source. Then mutate target in-place and drop source.
+    let source = links[source_idx].clone();
+
+    // If source has queued prompts the user might lose, log them.
+    if let Some(prompts) = &source.queued_prompts {
+        if !prompts.is_empty() {
+            logging::warn(
+                "merge",
+                &format!(
+                    "dropping {} queued prompt(s) from source card {}",
+                    prompts.len(),
+                    &source.id
+                ),
+            );
+        }
+    }
+
+    merge_ops::merge_into_target(&source, &mut links[target_idx]);
+
+    // Remove source (do this AFTER mutating target since target_idx > source_idx
+    // would shift; use retain to avoid index bookkeeping).
+    let source_id = source.id.clone();
+    links.retain(|l| l.id != source_id);
+
+    state
+        .coordination_store
+        .write_links(&links)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    logging::info(
+        "merge",
+        &format!(
+            "merged {} → {}",
+            short_id(&source_card_id),
+            short_id(&target_card_id)
+        ),
+    );
+
+    Ok(())
+}
+
+fn short_id(id: &str) -> String {
+    id.chars().take(8).collect()
+}
+
+#[tauri::command]
+async fn move_card_to_project(
+    card_id: String,
+    target_project_path: String,
+    state: tauri::State<'_, AppState>,
+) -> Result<(), String> {
+    let mut links = state
+        .coordination_store
+        .read_links()
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let idx = links
+        .iter()
+        .position(|l| l.id == card_id)
+        .ok_or_else(|| format!("card {card_id} not found"))?;
+
+    let (session_id, session_path) = match links[idx].session_link.as_ref() {
+        Some(sl) => (sl.session_id.clone(), sl.session_path.clone()),
+        None => (String::new(), None),
+    };
+
+    // If the card has a session jsonl, rewrite it into the target project's
+    // encoded directory and update `cwd` in every line so macOS/CLI find it.
+    let new_session_path = if let Some(path) = session_path {
+        if !session_id.is_empty() {
+            match session_mover::move_session(&session_id, &path, &target_project_path).await {
+                Ok(new_path) => Some(new_path),
+                Err(e) => {
+                    logging::warn(
+                        "move-card",
+                        &format!("failed to move session jsonl for {card_id}: {e}"),
+                    );
+                    // Continue anyway — the link metadata still gets updated.
+                    None
+                }
+            }
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    let link = &mut links[idx];
+    link.project_path = Some(target_project_path);
+    if let (Some(sl), Some(new_path)) = (link.session_link.as_mut(), new_session_path) {
+        sl.session_path = Some(new_path);
+    }
+    link.updated_at = chrono::Utc::now();
+
+    state
+        .coordination_store
+        .write_links(&links)
         .await
         .map_err(|e| e.to_string())
 }
@@ -1045,6 +1191,92 @@ fn start_hook_polling(app: tauri::AppHandle) {
     });
 }
 
+
+// ── Remote / sync commands (Phase 5) ─────────────────────────────────────────
+
+#[tauri::command]
+async fn remote_prereqs() -> Result<remote_shell::RemotePrereqs, String> {
+    Ok(remote_shell::prereqs())
+}
+
+#[tauri::command]
+async fn remote_deploy_shell() -> Result<(), String> {
+    remote_shell::deploy().await.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn mutagen_status() -> Result<mutagen::SyncStatus, String> {
+    Ok(mutagen::status().await)
+}
+
+#[tauri::command]
+async fn mutagen_raw_status() -> Result<String, String> {
+    mutagen::raw_status().await.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn mutagen_start(
+    state: tauri::State<'_, AppState>,
+) -> Result<(), String> {
+    let settings = state.settings_store.read().await.map_err(|e| e.to_string())?;
+    let Some(remote) = settings.remote.as_ref() else {
+        return Err("Remote settings not configured".to_string());
+    };
+    if remote.host.is_empty() || remote.remote_path.is_empty() || remote.local_path.is_empty() {
+        return Err("Remote host / remotePath / localPath must all be set".to_string());
+    }
+    let ignores = remote
+        .sync_ignores
+        .clone()
+        .unwrap_or_else(mutagen::default_ignores);
+
+    mutagen::ensure_daemon().await;
+    mutagen::start_sync(&remote.local_path, &remote.host, &remote.remote_path, &ignores)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn mutagen_stop() -> Result<(), String> {
+    mutagen::stop_sync().await.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn mutagen_reset() -> Result<(), String> {
+    mutagen::reset_sync().await.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn mutagen_flush() -> Result<(), String> {
+    mutagen::flush_sync().await.map_err(|e| e.to_string())
+}
+
+fn start_remote_polling(app: tauri::AppHandle) {
+    tauri::async_runtime::spawn(async move {
+        let watcher = remote_status::RemoteStatusWatcher::new();
+        let _ = tokio::fs::create_dir_all(watcher.state_dir()).await;
+        let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(5));
+        let mut last_status: Option<mutagen::SyncStatus> = None;
+        loop {
+            interval.tick().await;
+
+            let status = mutagen::status().await;
+            let changed = match (&last_status, &status) {
+                (Some(prev), curr) => prev.kind != curr.kind || prev.conflict_count != curr.conflict_count,
+                (None, _) => true,
+            };
+            if changed {
+                let _ = app.emit("sync_status_event", &status);
+                last_status = Some(status);
+            }
+
+            for change in watcher.poll().await {
+                let _ = app.emit("remote_status_changed", &change);
+            }
+        }
+    });
+}
+
 // ── Entry point ──────────────────────────────────────────────────────────────
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -1103,6 +1335,16 @@ pub fn run() {
             tmux::tmux_new_window,
             tmux::tmux_kill_window,
             tmux::tmux_list_windows,
+            move_card_to_project,
+            merge_cards,
+            remote_prereqs,
+            remote_deploy_shell,
+            mutagen_status,
+            mutagen_raw_status,
+            mutagen_start,
+            mutagen_stop,
+            mutagen_reset,
+            mutagen_flush,
         ])
         .setup(|app| {
             logging::info(
@@ -1118,6 +1360,14 @@ pub fn run() {
             start_pr_polling(app.handle().clone());
             start_issue_polling(app.handle().clone());
             start_hook_polling(app.handle().clone());
+            start_remote_polling(app.handle().clone());
+
+            // Deploy the remote-shell wrapper at startup (idempotent).
+            tauri::async_runtime::spawn(async {
+                if let Err(e) = remote_shell::deploy().await {
+                    logging::warn("startup", &format!("remote-shell deploy failed: {e}"));
+                }
+            });
             Ok(())
         })
         .run(tauri::generate_context!())

@@ -103,7 +103,22 @@ export interface Link {
   queuedPrompts?: QueuedPrompt[];
   /** Manual sort position within a column; undefined = time-based ordering. */
   sortOrder?: number;
+  /** Coding assistant that owns this card. Drives which CLI runs in the
+   *  terminal. Defaults to "claude" for legacy/macOS-written cards. */
+  assistantId?: AssistantId;
 }
+
+export type AssistantId = "claude" | "gemini";
+
+export const ASSISTANT_DISPLAY: Record<AssistantId, string> = {
+  claude: "Claude Code",
+  gemini: "Gemini CLI",
+};
+
+export const ASSISTANT_CLI: Record<AssistantId, string> = {
+  claude: "claude",
+  gemini: "gemini",
+};
 
 export interface Session {
   id: string;
@@ -170,6 +185,45 @@ export interface SessionTimeoutSettings {
   activeThresholdMinutes: number;
 }
 
+/** Byte-compatible with macOS RemoteSettings — same JSON field names. */
+export interface RemoteSettings {
+  host: string;
+  remotePath: string;
+  localPath: string;
+  /** Omitted = use Mutagen defaults from mutagen.rs::default_ignores(). */
+  syncIgnores?: string[];
+}
+
+export type SyncStatusKind =
+  | "disabled"
+  | "watching"
+  | "scanning"
+  | "staging"
+  | "conflicts"
+  | "paused"
+  | "error";
+
+export interface SyncStatus {
+  kind: SyncStatusKind;
+  sessionName?: string;
+  conflictCount: number;
+  message?: string;
+}
+
+export interface RemoteHostStatus {
+  host: string;
+  online: boolean;
+  since?: string;
+}
+
+export interface RemotePrereqs {
+  mutagenAvailable: boolean;
+  bashAvailable: boolean;
+  sshAvailable: boolean;
+  mutagenPath?: string;
+  bashPath?: string;
+}
+
 export interface Settings {
   projects: Project[];
   globalView: GlobalViewSettings;
@@ -183,6 +237,7 @@ export interface Settings {
   terminalFontSize: number;
   /** Shell command for the embedded terminal — space-separated tokens. Default "cmd.exe". */
   terminalShell: string;
+  remote?: RemoteSettings;
 }
 
 export interface DependencyStatus {

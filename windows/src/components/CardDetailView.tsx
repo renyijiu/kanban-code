@@ -17,7 +17,9 @@ import {
   removeWorktree,
   forkSession,
   truncateSession,
+  moveCardToProject,
 } from "../store/boardStore";
+import { ASSISTANT_CLI, type Project, type AssistantId } from "../types";
 import { useTheme, t } from "../theme";
 import type { Turn, TranscriptPage, QueuedPrompt } from "../types";
 import TerminalView from "./Terminal";
@@ -82,6 +84,7 @@ export default function CardDetailView() {
   type TmuxWindow = { index: number; name: string; active: boolean };
   const [terminalTabs, setTerminalTabs] = useState<TmuxWindow[]>([]);
   const [activeTermTab, setActiveTermTab] = useState<number>(1);
+  const [availableProjects, setAvailableProjects] = useState<Project[]>([]);
 
   // Copy / "more" menu
   const [moreMenuOpen, setMoreMenuOpen] = useState(false);
@@ -129,6 +132,7 @@ export default function CardDetailView() {
       .then((s) => {
         setTerminalFontSize(s.terminalFontSize || 15);
         setTerminalShell((s.terminalShell && s.terminalShell.trim()) || "cmd.exe");
+        setAvailableProjects(s.projects ?? []);
       })
       .catch(() => {});
     invoke<boolean>("tmux_available")
@@ -305,6 +309,9 @@ export default function CardDetailView() {
   // tmux requires a Unix shell AND a working `tmux -V` inside it.
   const useTmux = isUnixShell && tmuxAvailable;
 
+  const assistantId: AssistantId = (card.link.assistantId ?? "claude") as AssistantId;
+  const cli = ASSISTANT_CLI[assistantId] ?? "claude";
+
   // Effective prompt + flags after the launch dialog (if shown). For resumes,
   // the dialog is skipped — launchFlags stays null and the dialog defaults
   // apply (no skip-perm, no env prefix). The same builder also feeds the
@@ -325,10 +332,10 @@ export default function CardDetailView() {
       const cdCmd = cwd ? `cd ${cwd.replace(/ /g, "\\ ")} && ` : "";
       const skipFlag = skipPerm ? " --dangerously-skip-permissions" : "";
       return sid
-        ? `${cdCmd}${envPrefix}claude --resume ${sid}${skipFlag}`
-        : `${cdCmd}${envPrefix}claude${skipFlag} '${prompt.replace(/'/g, "'\\''")}'`;
+        ? `${cdCmd}${envPrefix}${cli} --resume ${sid}${skipFlag}`
+        : `${cdCmd}${envPrefix}${cli}${skipFlag} '${prompt.replace(/'/g, "'\\''")}'`;
     },
-    [],
+    [cli],
   );
 
   const buildInnerCmdShellCmd = useCallback(
@@ -345,10 +352,10 @@ export default function CardDetailView() {
       const cdCmd = cwd ? `cd "${cwd}" && ` : "";
       const skipFlag = skipPerm ? " --dangerously-skip-permissions" : "";
       return sid
-        ? `${cdCmd}${envPrefix}claude --resume ${sid}${skipFlag}`
-        : `${cdCmd}${envPrefix}claude${skipFlag} "${prompt.replace(/"/g, '""')}"`;
+        ? `${cdCmd}${envPrefix}${cli} --resume ${sid}${skipFlag}`
+        : `${cdCmd}${envPrefix}${cli}${skipFlag} "${prompt.replace(/"/g, '""')}"`;
     },
-    [],
+    [cli],
   );
 
   // The inner bash command (`cd … && claude …`) — same for tmux + legacy
@@ -714,6 +721,17 @@ export default function CardDetailView() {
                 onFork={sessionId ? handleFork : undefined}
                 copiedLabel={copiedLabel}
                 themeTokens={c}
+                cardProjectPath={card.link.projectPath}
+                availableProjects={availableProjects}
+                onMoveToProject={async (targetPath) => {
+                  setMoreMenuOpen(false);
+                  try {
+                    await moveCardToProject(card.id, targetPath);
+                    await useBoardStore.getState().refresh();
+                  } catch (e) {
+                    useBoardStore.setState({ error: String(e) });
+                  }
+                }}
               />
             )}
           </div>
@@ -1049,8 +1067,11 @@ const CardMoreMenu = forwardRef<HTMLDivElement, {
   onFork?: () => void | Promise<void>;
   copiedLabel: string | null;
   themeTokens: ReturnType<typeof t>;
+  cardProjectPath?: string;
+  availableProjects?: Project[];
+  onMoveToProject?: (targetPath: string) => void | Promise<void>;
 }>(function CardMoreMenu(
-  { anchorRef, onClose, onCopy, cardId, sessionId, projectPath, branch, prUrl, worktreePath, onRemoveWorktree, onFork, copiedLabel, themeTokens: c },
+  { anchorRef, onClose, onCopy, cardId, sessionId, projectPath, branch, prUrl, worktreePath, onRemoveWorktree, onFork, copiedLabel, themeTokens: c, cardProjectPath, availableProjects, onMoveToProject },
   ref
 ) {
   useEffect(() => {
@@ -1168,6 +1189,44 @@ const CardMoreMenu = forwardRef<HTMLDivElement, {
           </button>
         </>
       )}
+      {availableProjects && availableProjects.length > 0 && onMoveToProject && (() => {
+        const targets = availableProjects.filter((p) => p.path !== cardProjectPath);
+        if (targets.length === 0) return null;
+        return (
+          <>
+            <div className="my-1 mx-2 h-px" style={{ background: c.border }} />
+            <div
+              className="px-3 pt-2 pb-1 text-[10.5px] font-semibold uppercase tracking-wider"
+              style={{ color: c.textDim }}
+            >
+              Move to project
+            </div>
+            {targets.map((p) => (
+              <button
+                key={p.path}
+                onClick={() => onMoveToProject(p.path)}
+                className="w-full flex items-center gap-2 px-3 py-1.5 text-left transition-colors"
+                onMouseEnter={(e) => { e.currentTarget.style.background = c.hoverBg; }}
+                onMouseLeave={(e) => { e.currentTarget.style.background = ""; }}
+              >
+                <span className="w-3.5 h-3.5 flex-shrink-0 flex items-center justify-center" style={{ color: c.textDim }}>
+                  <svg fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.8}>
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M3.75 9.776c.112-.017.227-.026.344-.026h15.812c.117 0 .232.009.344.026m-16.5 0a2.25 2.25 0 0 0-1.883 2.542l.857 6a2.25 2.25 0 0 0 2.227 1.932H19.05a2.25 2.25 0 0 0 2.227-1.932l.857-6a2.25 2.25 0 0 0-1.883-2.542m-16.5 0V6A2.25 2.25 0 0 1 6 3.75h3.879a1.5 1.5 0 0 1 1.06.44l2.122 2.12a1.5 1.5 0 0 0 1.06.44H18A2.25 2.25 0 0 1 20.25 9v.776" />
+                  </svg>
+                </span>
+                <span className="flex-1 min-w-0">
+                  <span className="block text-[12.5px]" style={{ color: c.textPrimary, fontWeight: 500 }}>
+                    {p.name || p.path}
+                  </span>
+                  <span className="block text-[10.5px] font-mono truncate" style={{ color: c.textDim }}>
+                    {p.path}
+                  </span>
+                </span>
+              </button>
+            ))}
+          </>
+        );
+      })()}
       {worktreePath && onRemoveWorktree && (
         <>
           <div className="my-1 mx-2 h-px" style={{ background: c.border }} />

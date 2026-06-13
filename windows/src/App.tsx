@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import BoardView from "./components/BoardView";
+import ListBoardView from "./components/ListBoardView";
 import CardDetailView from "./components/CardDetailView";
 import NewTaskDialog from "./components/NewTaskDialog";
 import OnboardingWizard from "./components/OnboardingWizard";
@@ -8,6 +9,7 @@ import SearchOverlay from "./components/SearchOverlay";
 import SettingsView from "./components/SettingsView";
 import { getSettings, initBoardEventListener, useBoardStore } from "./store/boardStore";
 import { useTheme, t } from "./theme";
+import { installAppScaleShortcuts } from "./appScale";
 
 const isMac =
   typeof navigator !== "undefined" &&
@@ -26,6 +28,9 @@ export default function App() {
     setSearchOpen,
     setNewTaskOpen,
     setSettingsOpen,
+    syncStatus,
+    viewMode,
+    setViewMode,
   } = useBoardStore();
 
   const [showOnboarding, setShowOnboarding] = useState<boolean | null>(null);
@@ -75,9 +80,11 @@ export default function App() {
   useEffect(() => {
     refresh();
     initBoardEventListener();
+    const teardownScale = installAppScaleShortcuts();
     getSettings()
       .then((s) => setShowOnboarding(!s.hasCompletedOnboarding))
       .catch(() => setShowOnboarding(false));
+    return teardownScale;
   }, []);
 
   useEffect(() => {
@@ -139,6 +146,48 @@ export default function App() {
         </div>
 
         <div className="flex items-center gap-2">
+          {syncStatus.kind !== "disabled" && (
+            <button
+              onClick={() => setSettingsOpen(true)}
+              title={syncStatus.message ? `Mutagen: ${syncStatus.message}` : `Mutagen: ${syncStatus.kind}`}
+              className="flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] transition-colors"
+              style={{
+                background: syncPillBg(syncStatus.kind),
+                color: syncPillFg(syncStatus.kind),
+                border: `1px solid ${c.border}`,
+              }}
+            >
+              <span
+                className="w-1.5 h-1.5 rounded-full"
+                style={{ background: syncPillFg(syncStatus.kind) }}
+              />
+              {syncPillLabel(syncStatus.kind, syncStatus.conflictCount)}
+            </button>
+          )}
+          {/* Board / List view toggle */}
+          <div
+            className="flex items-center rounded-lg p-0.5"
+            style={{ background: c.bgAccent("0.05"), border: `1px solid ${c.border}` }}
+          >
+            {(["board", "list"] as const).map((m) => {
+              const active = viewMode === m;
+              return (
+                <button
+                  key={m}
+                  onClick={() => setViewMode(m)}
+                  className="px-2.5 py-1 rounded-md text-[12px] font-medium transition-colors"
+                  style={{
+                    background: active ? c.bgCard : "transparent",
+                    color: active ? c.textPrimary : c.textMuted,
+                    border: active ? `1px solid ${c.borderBright}` : "1px solid transparent",
+                  }}
+                  title={m === "board" ? "Board view" : "List view"}
+                >
+                  {m === "board" ? "Board" : "List"}
+                </button>
+              );
+            })}
+          </div>
           <button
             onClick={() => setSearchOpen(true)}
             className="flex items-center gap-2 px-3 py-1.5 rounded-lg transition-colors"
@@ -212,7 +261,7 @@ export default function App() {
           <SettingsView />
         ) : (
           <>
-            <BoardView />
+            {viewMode === "list" ? <ListBoardView /> : <BoardView />}
             {selectedCardId && <CardDetailView />}
           </>
         )}
@@ -256,4 +305,31 @@ export default function App() {
       )}
     </div>
   );
+}
+
+function syncPillLabel(kind: string, conflicts: number): string {
+  if (kind === "conflicts") return `Conflicts (${conflicts})`;
+  return kind.charAt(0).toUpperCase() + kind.slice(1);
+}
+function syncPillBg(kind: string): string {
+  switch (kind) {
+    case "watching": return "rgba(63, 185, 80, 0.10)";
+    case "scanning":
+    case "staging": return "rgba(79, 142, 247, 0.12)";
+    case "conflicts": return "rgba(255, 133, 88, 0.14)";
+    case "paused": return "rgba(160, 160, 170, 0.10)";
+    case "error": return "rgba(255, 85, 85, 0.12)";
+    default: return "transparent";
+  }
+}
+function syncPillFg(kind: string): string {
+  switch (kind) {
+    case "watching": return "#3fb950";
+    case "scanning":
+    case "staging": return "#4f8ef7";
+    case "conflicts": return "#ff8c5a";
+    case "paused": return "#a0a0aa";
+    case "error": return "#ff5555";
+    default: return "#777";
+  }
 }
