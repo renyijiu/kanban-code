@@ -83,24 +83,27 @@ export default function App() {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       const mod = e.metaKey || e.ctrlKey;
-      if (mod && e.key === "k") {
+      // Match on physical key location (e.code) AND e.key so non-US
+      // keyboard layouts (where "," sits behind shift, etc.) still work.
+      const keyLower = e.key.length === 1 ? e.key.toLowerCase() : e.key;
+      if (mod && (e.code === "KeyK" || keyLower === "k")) {
         e.preventDefault();
         setSearchOpen(true);
         return;
       }
-      if (mod && e.key === "n") {
+      if (mod && (e.code === "KeyN" || keyLower === "n")) {
         e.preventDefault();
         setNewTaskOpen(true);
         return;
       }
       // Ctrl+, (or Cmd+,) — toggle settings, mirroring the macOS app.
-      if (mod && e.key === ",") {
+      if (mod && (e.code === "Comma" || keyLower === ",")) {
         e.preventDefault();
         const { settingsOpen: open } = useBoardStore.getState();
         setSettingsOpen(!open);
         return;
       }
-      if (e.key === "Escape") {
+      if (e.key === "Escape" || e.code === "Escape") {
         // Close in stack order: dialog > settings > drawer. Each branch
         // returns so a single Esc only dismisses the topmost layer.
         const s = useBoardStore.getState();
