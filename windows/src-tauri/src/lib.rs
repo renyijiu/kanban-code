@@ -4,6 +4,7 @@ mod bm25;
 mod board_state;
 mod card_reconciler;
 mod coding_assistant;
+pub mod crash_handler;
 mod coordination_store;
 mod gh_cli;
 mod git_remote;
