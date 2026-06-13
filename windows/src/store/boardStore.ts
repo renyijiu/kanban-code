@@ -12,6 +12,16 @@ import type {
   TranscriptPage,
 } from "../types";
 
+export type BoardViewMode = "board" | "list";
+
+const VIEW_MODE_STORAGE_KEY = "kanban.boardViewMode";
+
+function loadViewMode(): BoardViewMode {
+  if (typeof window === "undefined") return "board";
+  const raw = window.localStorage.getItem(VIEW_MODE_STORAGE_KEY);
+  return raw === "list" ? "list" : "board";
+}
+
 interface BoardStore {
   // State
   cards: CardDto[];
@@ -23,6 +33,7 @@ interface BoardStore {
   lastRefresh: string | null;
   error: string | null;
   selectedProjectPath: string | null;
+  viewMode: BoardViewMode;
 
   // Actions
   refresh: () => Promise<void>;
@@ -42,6 +53,7 @@ interface BoardStore {
   setSettingsOpen: (open: boolean) => void;
   setNewTaskOpen: (open: boolean) => void;
   setSelectedProject: (path: string | null) => void;
+  setViewMode: (mode: BoardViewMode) => void;
   clearError: () => void;
 
   // Computed helpers
@@ -59,6 +71,7 @@ export const useBoardStore = create<BoardStore>((set, get) => ({
   lastRefresh: null,
   error: null,
   selectedProjectPath: null,
+  viewMode: loadViewMode(),
 
   refresh: async () => {
     set({ isLoading: true, error: null });
@@ -169,6 +182,12 @@ export const useBoardStore = create<BoardStore>((set, get) => ({
   setSettingsOpen: (open) => set({ settingsOpen: open }),
   setNewTaskOpen: (open) => set({ newTaskOpen: open }),
   setSelectedProject: (path) => set({ selectedProjectPath: path }),
+  setViewMode: (mode) => {
+    if (typeof window !== "undefined") {
+      window.localStorage.setItem(VIEW_MODE_STORAGE_KEY, mode);
+    }
+    set({ viewMode: mode });
+  },
   clearError: () => set({ error: null }),
 
   cardsInColumn: (column) => {
