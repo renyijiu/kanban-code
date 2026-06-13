@@ -49,6 +49,7 @@ export default function CardDetailView() {
 
   // Settings
   const [terminalFontSize, setTerminalFontSize] = useState(15);
+  const [terminalShell, setTerminalShell] = useState<string>("cmd.exe");
 
   // Search state
   const [searchText, setSearchText] = useState("");
@@ -83,9 +84,14 @@ export default function CardDetailView() {
     document.addEventListener("mouseup", onMouseUp);
   }, [drawerWidth]);
 
-  // Load terminal font size from settings
+  // Load terminal font size + shell from settings
   useEffect(() => {
-    getSettings().then((s) => setTerminalFontSize(s.terminalFontSize || 15)).catch(() => {});
+    getSettings()
+      .then((s) => {
+        setTerminalFontSize(s.terminalFontSize || 15);
+        setTerminalShell((s.terminalShell && s.terminalShell.trim()) || "cmd.exe");
+      })
+      .catch(() => {});
   }, []);
 
   // Reset state when card changes
@@ -168,11 +174,28 @@ export default function CardDetailView() {
     setIsEditing(false);
   };
 
-  const shellCommand = ["wsl.exe"];
-  const cdCmd = projectPath ? `cd ${projectPath.replace(/ /g, "\\ ")} && ` : "";
-  const terminalInput = sessionId
-    ? `${cdCmd}claude --resume ${sessionId}\r`
-    : `${cdCmd}claude '${(promptBody ?? "").replace(/'/g, "'\\''")}'\r`;
+  // Split the user-configurable shell string into [exe, ...args]. Default is
+  // cmd.exe so the app is Windows-native out of the box; setting it to
+  // "wsl.exe" launches Claude inside WSL instead.
+  const shellCommand = terminalShell.trim().split(/\s+/).filter(Boolean);
+  const shellExe = (shellCommand[0] ?? "cmd.exe").toLowerCase();
+  const isUnixShell = /(^|[\\/])(wsl|bash|sh|zsh|fish)(\.exe)?$/.test(shellExe);
+
+  const terminalInput = (() => {
+    if (isUnixShell) {
+      // bash-style: backslash-escape spaces in path, single-quote the prompt.
+      const cdCmd = projectPath ? `cd ${projectPath.replace(/ /g, "\\ ")} && ` : "";
+      return sessionId
+        ? `${cdCmd}claude --resume ${sessionId}\r`
+        : `${cdCmd}claude '${(promptBody ?? "").replace(/'/g, "'\\''")}'\r`;
+    }
+    // cmd.exe / pwsh — double-quote the path; "" escapes a quote inside cmd
+    // double-quotes (PowerShell also accepts it).
+    const cdCmd = projectPath ? `cd "${projectPath}" && ` : "";
+    return sessionId
+      ? `${cdCmd}claude --resume ${sessionId}\r`
+      : `${cdCmd}claude "${(promptBody ?? "").replace(/"/g, '""')}"\r`;
+  })();
 
   const handleStartTerminal = () => {
     setTerminalActive(true);

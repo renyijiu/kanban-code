@@ -168,6 +168,8 @@ export interface Settings {
   hasCompletedOnboarding: boolean;
   editor: string;
   terminalFontSize: number;
+  /** Shell command for the embedded terminal — space-separated tokens. Default "cmd.exe". */
+  terminalShell: string;
 }
 
 export interface DependencyStatus {

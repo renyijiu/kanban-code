@@ -57,8 +57,10 @@ make run-app
 
 ### Windows
 
-Requires **[WSL](https://learn.microsoft.com/windows/wsl/install)** — the embedded terminal runs inside WSL via `wsl.exe`, and the [Claude Code](https://docs.anthropic.com/en/docs/claude-code) CLI is expected to run there. To build you also need [Node.js](https://nodejs.org/) (v18+) and [Rust](https://rustup.rs/). Optionally [GitHub CLI](https://cli.github.com/) for PR/issue features.
+Native Windows app. Requires [Node.js](https://nodejs.org/) (v18+), [Rust](https://rustup.rs/), and the [Claude Code](https://docs.anthropic.com/en/docs/claude-code) CLI (`npm install -g @anthropic-ai/claude-code`). Optionally [GitHub CLI](https://cli.github.com/) for PR/issue features.
 
+> **Embedded terminal:** launches `cmd.exe` by default and runs `claude` natively. To run Claude inside WSL or PowerShell instead, change **Settings → General → Terminal shell** to `wsl.exe`, `pwsh.exe -NoLogo`, or any shell on your PATH.
+>
 > **Logs:** diagnostics are written to `%APPDATA%\kanban-code\logs\kanban-code.log`. Set `KANBAN_CODE_DEBUG_LOGS=1` for verbose output.
 
 ```bash

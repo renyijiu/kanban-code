@@ -123,10 +123,27 @@ pub struct Settings {
     /// Terminal font size (8-24)
     #[serde(default = "default_terminal_font_size")]
     pub terminal_font_size: u32,
+    /// Shell command used by the embedded terminal — space-separated tokens.
+    /// Defaults to `cmd.exe` for a native Windows experience. Set to
+    /// `wsl.exe` (or `pwsh.exe -NoLogo`, etc.) to run Claude in a different
+    /// shell. The first token is the executable; remaining tokens are args.
+    #[serde(default = "default_terminal_shell")]
+    pub terminal_shell: String,
 }
 
 fn default_terminal_font_size() -> u32 {
     15
+}
+
+fn default_terminal_shell() -> String {
+    #[cfg(target_os = "windows")]
+    {
+        "cmd.exe".to_string()
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        "bash".to_string()
+    }
 }
 
 fn default_issue_template() -> String {
