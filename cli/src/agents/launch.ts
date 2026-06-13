@@ -10,6 +10,7 @@ import { upsertCard, isoNow } from "../cards.js";
 import { generateKsuid } from "../ksuid.js";
 import { Link, ManualOverrides } from "../types.js";
 import { runtimeSpec } from "./runtime.js";
+import { randomUUID } from "node:crypto";
 
 export interface LaunchOptions {
   /// Working directory for the session (the agent's workspace / worktree root).
@@ -74,6 +75,16 @@ export function ensureAgentSession(
       ? !!findCodexRollout(opts.cwd)
       : !!findSessionJsonl(identity.sessionId));
 
+  // A forced-fresh ephemeral launch must NOT reuse the stable uuidv5(slug)
+  // session id: a recycled slug collides with its own prior transcript, so
+  // `claude --session-id <existing>` without --resume errors "Session ID
+  // already in use" and the card<->session link breaks. Mint a unique id for
+  // that launch so it starts cleanly. The readable tmux name stays stable.
+  const launchIdentity: AgentIdentity =
+    opts.forceFresh && !tmuxAlive
+      ? { ...identity, sessionId: randomUUID() }
+      : identity;
+
   let action: LaunchAction;
   let command: string | undefined;
 
@@ -81,8 +92,8 @@ export function ensureAgentSession(
     action = "noop-running";
   } else {
     const args = spec.buildArgs({
-      sessionId: identity.sessionId,
-      slug: identity.slug,
+      sessionId: launchIdentity.sessionId,
+      slug: launchIdentity.slug,
       resume: sessionExists,
       skipPermissions: skipPerms,
       model: opts.model,
@@ -94,19 +105,19 @@ export function ensureAgentSession(
     // Both runtimes' hooks correlate events to this agent via this env var, so
     // the daemon/bridge key on our stable session id regardless of the id the
     // runtime mints internally.
-    const env = { ...(opts.env ?? {}), KANBAN_SESSION_ID: identity.sessionId, KANBAN_SLUG: identity.slug };
-    const res = createTmuxSession(identity.tmuxName, opts.cwd, command, env);
+    const env = { ...(opts.env ?? {}), KANBAN_SESSION_ID: launchIdentity.sessionId, KANBAN_SLUG: launchIdentity.slug };
+    const res = createTmuxSession(launchIdentity.tmuxName, opts.cwd, command, env);
     if (!res.ok) {
       throw new Error(`Failed to create tmux session "${identity.tmuxName}": ${res.error}`);
     }
   }
 
-  const card = upsertAgentCard(identity, opts.cwd);
+  const card = upsertAgentCard(launchIdentity, opts.cwd);
   return {
     action,
-    identity,
-    sessionId: identity.sessionId,
-    tmuxName: identity.tmuxName,
+    identity: launchIdentity,
+    sessionId: launchIdentity.sessionId,
+    tmuxName: launchIdentity.tmuxName,
     command,
     card,
   };
