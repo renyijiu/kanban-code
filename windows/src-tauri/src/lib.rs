@@ -15,6 +15,7 @@ mod session_ops;
 mod session_discovery;
 mod settings_store;
 mod shell_command;
+mod tmux;
 mod transcript_reader;
 
 use board_state::BoardState;
@@ -1042,6 +1043,15 @@ pub fn run() {
             fork_session,
             truncate_session,
             discover_projects,
+            tmux::tmux_available,
+            tmux::tmux_ensure_session,
+            tmux::tmux_send_prompt,
+            tmux::tmux_paste,
+            tmux::tmux_capture,
+            tmux::tmux_kill_session,
+            tmux::tmux_new_window,
+            tmux::tmux_kill_window,
+            tmux::tmux_list_windows,
         ])
         .setup(|app| {
             logging::info(
