@@ -1,6 +1,7 @@
 import { forwardRef, useEffect, useState, useRef, useCallback } from "react";
 import { ask } from "@tauri-apps/plugin-dialog";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import {
   getTranscript,
   getSettings,
@@ -398,6 +399,79 @@ export default function CardDetailView() {
       useBoardStore.setState({ error: String(e) });
     }
   };
+
+  // ── Hook-driven queued-prompt auto-send ────────────────────────────────────
+  // Mirrors the macOS `BackgroundOrchestrator.autoSendQueuedPrompt` flow:
+  // when Claude fires a `Stop` hook event for THIS card's session, wait
+  // ~1s, and if the user hasn't typed a new prompt during that window,
+  // send the first queued prompt where `sendAutomatically` is true. A
+  // 62-second dedup window on each prompt id prevents a flapping Stop
+  // event (e.g. a quick second tool call) from double-sending.
+  //
+  // Refs not state — these change continuously and shouldn't trigger
+  // re-renders.
+  const lastUserPromptAt = useRef<number>(0);
+  const recentlyAutoSent = useRef<Map<string, number>>(new Map());
+
+  useEffect(() => {
+    if (!card) return;
+    const sessId = card.link.sessionLink?.sessionId;
+    if (!sessId) return;
+    let cancelled = false;
+    let pending: ReturnType<typeof setTimeout> | null = null;
+    const unsubP = listen<{
+      sessionId: string;
+      eventName: string;
+      transcriptPath: string | null;
+      notificationType: string | null;
+      timestamp: string;
+    }>("hook-event", (ev) => {
+      if (cancelled) return;
+      const p = ev.payload;
+      if (!p || p.sessionId !== sessId) return;
+      if (p.eventName === "UserPromptSubmit") {
+        lastUserPromptAt.current = Date.now();
+        return;
+      }
+      if (p.eventName !== "Stop") return;
+      const stopAt = Date.now();
+      if (pending) clearTimeout(pending);
+      pending = setTimeout(() => {
+        // User typed in the meantime — back off.
+        if (Date.now() - lastUserPromptAt.current < 1100) return;
+        // Resolve the freshest queue from the store (closure value would be
+        // stale by the time the timer fires).
+        const fresh = useBoardStore.getState().cards.find((c) => c.id === card.id)?.link
+          .queuedPrompts ?? queuedPrompts;
+        const now = Date.now();
+        const target = fresh.find(
+          (qp) =>
+            qp.sendAutomatically &&
+            (recentlyAutoSent.current.get(qp.id) ?? 0) + 62_000 < now,
+        );
+        if (!target || !terminalWriteRef.current) return;
+        terminalWriteRef.current(target.body + "\r");
+        recentlyAutoSent.current.set(target.id, now);
+        // Garbage-collect dedup entries older than 5 minutes.
+        for (const [id, at] of recentlyAutoSent.current) {
+          if (now - at > 5 * 60_000) recentlyAutoSent.current.delete(id);
+        }
+        removeQueuedPrompt(card.id, target.id)
+          .then(() =>
+            setQueuedPrompts((prev) => prev.filter((p) => p.id !== target.id)),
+          )
+          .catch(() => {});
+      }, 1000);
+      // suppress "unused" lint
+      void stopAt;
+    });
+
+    return () => {
+      cancelled = true;
+      if (pending) clearTimeout(pending);
+      unsubP.then((unsub) => unsub()).catch(() => {});
+    };
+  }, [card?.id, card?.link.sessionLink?.sessionId]);
 
   const handleCloseTermTab = async (idx: number) => {
     if (!useTmux) return;
