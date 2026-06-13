@@ -22,6 +22,7 @@ export default function App() {
     error,
     clearError,
     refresh,
+    selectCard,
     setSearchOpen,
     setNewTaskOpen,
     setSettingsOpen,
@@ -81,22 +82,37 @@ export default function App() {
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if ((e.metaKey || e.ctrlKey) && e.key === "k") {
+      const mod = e.metaKey || e.ctrlKey;
+      if (mod && e.key === "k") {
         e.preventDefault();
         setSearchOpen(true);
+        return;
       }
-      if ((e.metaKey || e.ctrlKey) && e.key === "n") {
+      if (mod && e.key === "n") {
         e.preventDefault();
         setNewTaskOpen(true);
+        return;
+      }
+      // Ctrl+, (or Cmd+,) — toggle settings, mirroring the macOS app.
+      if (mod && e.key === ",") {
+        e.preventDefault();
+        const { settingsOpen: open } = useBoardStore.getState();
+        setSettingsOpen(!open);
+        return;
       }
       if (e.key === "Escape") {
-        setSearchOpen(false);
-        setNewTaskOpen(false);
+        // Close in stack order: dialog > settings > drawer. Each branch
+        // returns so a single Esc only dismisses the topmost layer.
+        const s = useBoardStore.getState();
+        if (s.newTaskOpen) { setNewTaskOpen(false); return; }
+        if (s.searchOpen) { setSearchOpen(false); return; }
+        if (s.settingsOpen) { setSettingsOpen(false); return; }
+        if (s.selectedCardId) { selectCard(null); return; }
       }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, []);
+  }, [selectCard, setNewTaskOpen, setSearchOpen, setSettingsOpen]);
 
   return (
     <div className="flex flex-col h-full overflow-hidden" style={{ background: c.bg, color: c.text }}>
