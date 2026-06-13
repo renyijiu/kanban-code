@@ -28,6 +28,7 @@ export default function App() {
     setSearchOpen,
     setNewTaskOpen,
     setSettingsOpen,
+    syncStatus,
     viewMode,
     setViewMode,
   } = useBoardStore();
@@ -145,6 +146,24 @@ export default function App() {
         </div>
 
         <div className="flex items-center gap-2">
+          {syncStatus.kind !== "disabled" && (
+            <button
+              onClick={() => setSettingsOpen(true)}
+              title={syncStatus.message ? `Mutagen: ${syncStatus.message}` : `Mutagen: ${syncStatus.kind}`}
+              className="flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] transition-colors"
+              style={{
+                background: syncPillBg(syncStatus.kind),
+                color: syncPillFg(syncStatus.kind),
+                border: `1px solid ${c.border}`,
+              }}
+            >
+              <span
+                className="w-1.5 h-1.5 rounded-full"
+                style={{ background: syncPillFg(syncStatus.kind) }}
+              />
+              {syncPillLabel(syncStatus.kind, syncStatus.conflictCount)}
+            </button>
+          )}
           {/* Board / List view toggle */}
           <div
             className="flex items-center rounded-lg p-0.5"
@@ -286,4 +305,31 @@ export default function App() {
       )}
     </div>
   );
+}
+
+function syncPillLabel(kind: string, conflicts: number): string {
+  if (kind === "conflicts") return `Conflicts (${conflicts})`;
+  return kind.charAt(0).toUpperCase() + kind.slice(1);
+}
+function syncPillBg(kind: string): string {
+  switch (kind) {
+    case "watching": return "rgba(63, 185, 80, 0.10)";
+    case "scanning":
+    case "staging": return "rgba(79, 142, 247, 0.12)";
+    case "conflicts": return "rgba(255, 133, 88, 0.14)";
+    case "paused": return "rgba(160, 160, 170, 0.10)";
+    case "error": return "rgba(255, 85, 85, 0.12)";
+    default: return "transparent";
+  }
+}
+function syncPillFg(kind: string): string {
+  switch (kind) {
+    case "watching": return "#3fb950";
+    case "scanning":
+    case "staging": return "#4f8ef7";
+    case "conflicts": return "#ff8c5a";
+    case "paused": return "#a0a0aa";
+    case "error": return "#ff5555";
+    default: return "#777";
+  }
 }

@@ -1,6 +1,17 @@
 import { useEffect, useState, type ReactNode } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
-import { discoverProjects, getSettings, saveSettings, useBoardStore } from "../store/boardStore";
+import {
+  discoverProjects,
+  getSettings,
+  mutagenRawStatus,
+  mutagenReset,
+  mutagenStart,
+  mutagenStop,
+  remotePrereqs,
+  saveSettings,
+  useBoardStore,
+} from "../store/boardStore";
+import type { RemotePrereqs, RemoteSettings } from "../types";
 import { useTheme, t } from "../theme";
 import type { Settings } from "../types";
 
@@ -21,7 +32,7 @@ export default function SettingsView() {
   const [settings, setSettings] = useState<Settings | null>(null);
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
-  const [activeSection, setActiveSection] = useState<"projects" | "general" | "github" | "notifications">("general");
+  const [activeSection, setActiveSection] = useState<"projects" | "general" | "github" | "notifications" | "remote">("general");
 
   useEffect(() => {
     getSettings().then(setSettings).catch(console.error);
@@ -52,12 +63,13 @@ export default function SettingsView() {
     );
   }
 
-  const sections = ["general", "projects", "github", "notifications"] as const;
+  const sections = ["general", "projects", "github", "notifications", "remote"] as const;
   const sectionIcons: Record<string, string> = {
     general: "M10.343 3.94c.09-.542.56-.94 1.11-.94h1.093c.55 0 1.02.398 1.11.94l.149.894c.07.424.384.764.78.93.398.164.855.142 1.205-.108l.737-.527a1.125 1.125 0 0 1 1.45.12l.773.774c.39.389.44 1.002.12 1.45l-.527.737c-.25.35-.272.806-.107 1.204.165.397.505.71.93.78l.893.15c.543.09.94.56.94 1.109v1.094c0 .55-.397 1.02-.94 1.11l-.893.149c-.425.07-.765.383-.93.78-.165.398-.143.854.107 1.204l.527.738c.32.447.269 1.06-.12 1.45l-.774.773a1.125 1.125 0 0 1-1.449.12l-.738-.527c-.35-.25-.806-.272-1.203-.107-.397.165-.71.505-.781.929l-.149.894c-.09.542-.56.94-1.11.94h-1.094c-.55 0-1.019-.398-1.11-.94l-.148-.894c-.071-.424-.384-.764-.781-.93-.398-.164-.854-.142-1.204.108l-.738.527c-.447.32-1.06.269-1.45-.12l-.773-.774a1.125 1.125 0 0 1-.12-1.45l.527-.737c.25-.35.273-.806.108-1.204-.165-.397-.505-.71-.93-.78l-.894-.15c-.542-.09-.94-.56-.94-1.109v-1.094c0-.55.398-1.02.94-1.11l.894-.149c.424-.07.765-.383.93-.78.165-.398.143-.854-.107-1.204l-.527-.738a1.125 1.125 0 0 1 .12-1.45l.773-.773a1.125 1.125 0 0 1 1.45-.12l.737.527c.35.25.807.272 1.204.107.397-.165.71-.505.78-.929l.15-.894Z M15 12a3 3 0 1 1-6 0 3 3 0 0 1 6 0Z",
     projects: "M2.25 12.75V12A2.25 2.25 0 0 1 4.5 9.75h15A2.25 2.25 0 0 1 21.75 12v.75m-8.69-6.44-2.12-2.12a1.5 1.5 0 0 0-1.061-.44H4.5A2.25 2.25 0 0 0 2.25 6v12a2.25 2.25 0 0 0 2.25 2.25h15A2.25 2.25 0 0 0 21.75 18V9a2.25 2.25 0 0 0-2.25-2.25h-5.379a1.5 1.5 0 0 1-1.06-.44Z",
     github: "M10 6H6a2 2 0 0 0-2 2v10a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-4M14 4h6m0 0v6m0-6L10 14",
     notifications: "M14.857 17.082a23.848 23.848 0 0 0 5.454-1.31A8.967 8.967 0 0 1 18 9.75V9A6 6 0 0 0 6 9v.75a8.967 8.967 0 0 1-2.312 6.022c1.733.64 3.56 1.085 5.455 1.31m5.714 0a24.255 24.255 0 0 1-5.714 0m5.714 0a3 3 0 1 1-5.714 0",
+    remote: "M12 21a9 9 0 1 0-9-9m9 9a9 9 0 0 1-9-9m9 9c1.657 0 3-4.03 3-9s-1.343-9-3-9m0 18c-1.657 0-3-4.03-3-9s1.343-9 3-9m-9 9h18",
   };
 
   return (
@@ -154,6 +166,9 @@ export default function SettingsView() {
           )}
           {activeSection === "notifications" && (
             <NotificationsSection settings={settings} onChange={setSettings} themeTokens={c} />
+          )}
+          {activeSection === "remote" && (
+            <RemoteSection settings={settings} onChange={setSettings} themeTokens={c} />
           )}
         </div>
       </div>
@@ -642,6 +657,187 @@ function NotificationsSection({
         </>
       )}
     </div>
+  );
+}
+
+function RemoteSection({
+  settings,
+  onChange,
+  themeTokens: c,
+}: {
+  settings: Settings;
+  onChange: (s: Settings) => void;
+  themeTokens: ThemeTokens;
+}) {
+  const remote: RemoteSettings = settings.remote ?? {
+    host: "",
+    remotePath: "",
+    localPath: "",
+  };
+  const [prereqs, setPrereqs] = useState<RemotePrereqs | null>(null);
+  const [busy, setBusy] = useState<string | null>(null);
+  const [rawStatus, setRawStatus] = useState<string>("");
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    remotePrereqs().then(setPrereqs).catch(console.error);
+  }, []);
+
+  const update = (patch: Partial<RemoteSettings>) =>
+    onChange({ ...settings, remote: { ...remote, ...patch } });
+
+  const refreshStatus = async () => {
+    try {
+      setRawStatus(await mutagenRawStatus());
+    } catch (e) {
+      setRawStatus(String(e));
+    }
+  };
+
+  const run = (label: string, fn: () => Promise<void>) => async () => {
+    setBusy(label);
+    setError(null);
+    try {
+      await fn();
+      await refreshStatus();
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const ignoresText = (remote.syncIgnores ?? []).join("\n");
+
+  return (
+    <div className="flex flex-col gap-5 max-w-2xl">
+      <div
+        className="rounded-xl p-4 text-xs"
+        style={{ background: c.bgAccent("0.03"), border: `1px solid ${c.border}`, color: c.textSecondary }}
+      >
+        <div className="font-medium mb-2" style={{ color: c.textPrimary }}>Prerequisites</div>
+        {!prereqs && <div style={{ color: c.textMuted }}>Checking…</div>}
+        {prereqs && (
+          <ul className="space-y-1">
+            <PrereqRow ok={prereqs.mutagenAvailable} label="mutagen.exe" path={prereqs.mutagenPath} c={c} />
+            <PrereqRow ok={prereqs.bashAvailable} label="Git for Windows (bash.exe)" path={prereqs.bashPath} c={c} />
+            <PrereqRow ok={prereqs.sshAvailable} label="ssh.exe" c={c} />
+          </ul>
+        )}
+        {prereqs && (!prereqs.mutagenAvailable || !prereqs.bashAvailable) && (
+          <div className="mt-2" style={{ color: c.textMuted }}>
+            Install <a href="https://mutagen.io/" target="_blank" rel="noreferrer" style={{ color: "#4f8ef7" }}>Mutagen</a>
+            {" "}and{" "}
+            <a href="https://git-scm.com/download/win" target="_blank" rel="noreferrer" style={{ color: "#4f8ef7" }}>Git for Windows</a>
+            , then restart the app.
+          </div>
+        )}
+      </div>
+
+      <FieldGroup label="SSH host" themeTokens={c}>
+        <input
+          value={remote.host}
+          onChange={(e) => update({ host: e.target.value })}
+          placeholder="user@hostname  (matches ~/.ssh/config)"
+          className="w-full rounded-xl px-3 py-2.5 text-sm font-mono outline-none transition-colors"
+          style={inputStyle(c)}
+        />
+      </FieldGroup>
+
+      <FieldGroup label="Remote path" themeTokens={c}>
+        <input
+          value={remote.remotePath}
+          onChange={(e) => update({ remotePath: e.target.value })}
+          placeholder="/home/user/projects"
+          className="w-full rounded-xl px-3 py-2.5 text-sm font-mono outline-none transition-colors"
+          style={inputStyle(c)}
+        />
+      </FieldGroup>
+
+      <FieldGroup label="Local path (Windows)" themeTokens={c}>
+        <input
+          value={remote.localPath}
+          onChange={(e) => update({ localPath: e.target.value })}
+          placeholder="C:\Users\you\projects"
+          className="w-full rounded-xl px-3 py-2.5 text-sm font-mono outline-none transition-colors"
+          style={inputStyle(c)}
+        />
+      </FieldGroup>
+
+      <FieldGroup label="Sync ignores (one per line, blank = defaults)" themeTokens={c}>
+        <textarea
+          value={ignoresText}
+          onChange={(e) => {
+            const lines = e.target.value
+              .split("\n")
+              .map((l) => l.trim())
+              .filter(Boolean);
+            update({ syncIgnores: lines.length ? lines : undefined });
+          }}
+          rows={6}
+          className="w-full rounded-xl px-3 py-2.5 text-sm font-mono outline-none transition-colors"
+          style={inputStyle(c)}
+        />
+      </FieldGroup>
+
+      <div className="flex items-center gap-2">
+        <button
+          onClick={run("start", mutagenStart)}
+          disabled={busy !== null || !prereqs?.mutagenAvailable}
+          className="px-3 py-1.5 rounded-lg bg-[#4f8ef7]/90 hover:bg-[#4f8ef7] disabled:opacity-40 text-white text-xs font-medium transition-all"
+        >
+          {busy === "start" ? "Starting…" : "Start sync"}
+        </button>
+        <button
+          onClick={run("stop", mutagenStop)}
+          disabled={busy !== null || !prereqs?.mutagenAvailable}
+          className="px-3 py-1.5 rounded-lg text-xs transition-all"
+          style={{ background: c.bgAccent("0.06"), color: c.textPrimary, border: `1px solid ${c.border}` }}
+        >
+          {busy === "stop" ? "Stopping…" : "Stop"}
+        </button>
+        <button
+          onClick={run("reset", mutagenReset)}
+          disabled={busy !== null || !prereqs?.mutagenAvailable}
+          className="px-3 py-1.5 rounded-lg text-xs transition-all"
+          style={{ background: c.bgAccent("0.06"), color: c.textPrimary, border: `1px solid ${c.border}` }}
+        >
+          {busy === "reset" ? "Resetting…" : "Reset"}
+        </button>
+        <button
+          onClick={refreshStatus}
+          className="px-3 py-1.5 rounded-lg text-xs transition-all"
+          style={{ background: c.bgAccent("0.06"), color: c.textPrimary, border: `1px solid ${c.border}` }}
+        >
+          Refresh status
+        </button>
+      </div>
+
+      {error && (
+        <div className="text-xs rounded-lg px-3 py-2" style={{ background: "rgba(255,80,80,0.08)", color: "#ff8585" }}>
+          {error}
+        </div>
+      )}
+
+      {rawStatus && (
+        <pre
+          className="text-[11px] font-mono whitespace-pre-wrap rounded-xl px-3 py-2.5 max-h-72 overflow-auto"
+          style={{ background: c.bgAccent("0.03"), border: `1px solid ${c.border}`, color: c.textSecondary }}
+        >
+          {rawStatus}
+        </pre>
+      )}
+    </div>
+  );
+}
+
+function PrereqRow({ ok, label, path, c }: { ok: boolean; label: string; path?: string; c: ThemeTokens }) {
+  return (
+    <li className="flex items-center gap-2">
+      <span style={{ color: ok ? "#3fb950" : "#ff8585" }}>{ok ? "✓" : "✗"}</span>
+      <span style={{ color: c.textPrimary }}>{label}</span>
+      {path && <span style={{ color: c.textMuted }} className="text-[11px] font-mono">— {path}</span>}
+    </li>
   );
 }
 
