@@ -88,6 +88,14 @@ export const useChannelsStore = create<ChannelsStore>((set, get) => ({
         // best-effort
       }
     });
+    const unsubDrafts = await listen("drafts-changed", async () => {
+      try {
+        const drafts = await invoke<ChannelDrafts>("get_drafts");
+        set({ drafts });
+      } catch {
+        // best-effort
+      }
+    });
     // DM logs — the watcher emits this when a per-pair JSONL changes. The
     // store doesn't currently track in-memory DM messages (the DM view loads
     // them on demand via read_dm_messages), so this listener just bumps a
@@ -107,7 +115,15 @@ export const useChannelsStore = create<ChannelsStore>((set, get) => ({
         );
       }
     );
-    set({ unlisten: [unsubChannels, unsubMessages, unsubReadState, unsubDmLogs] });
+    set({
+      unlisten: [
+        unsubChannels,
+        unsubMessages,
+        unsubReadState,
+        unsubDrafts,
+        unsubDmLogs,
+      ],
+    });
   },
 
   teardown: () => {
