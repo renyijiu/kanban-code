@@ -332,6 +332,70 @@ async fn gh_is_authed() -> bool {
 }
 
 #[tauri::command]
+async fn merge_pr(
+    project_path: String,
+    number: i64,
+    state: tauri::State<'_, AppState>,
+) -> Result<String, String> {
+    // Look up the user-configured merge template
+    // (Settings → GitHub → Merge command, e.g.
+    //  "gh pr merge ${number} --squash --delete-branch").
+    let template = state
+        .settings_store
+        .read()
+        .await
+        .map(|s| s.github.merge_command.clone())
+        .map_err(|e| e.to_string())?;
+    let command = template.replace("${number}", &number.to_string());
+    if command.trim().is_empty() {
+        return Err("merge command template is empty".to_string());
+    }
+
+    logging::info("merge-pr", &format!("running `{command}` in {project_path}"));
+
+    // Use the platform shell so users can write whatever template they want
+    // (pipes, &&, --flag args). Same shape as macOS LaunchSession.
+    #[cfg(target_os = "windows")]
+    let output = tokio::process::Command::new("cmd")
+        .args(["/c", &command])
+        .current_dir(&project_path)
+        .output()
+        .await
+        .map_err(|e| format!("spawn merge command: {e}"))?;
+    #[cfg(not(target_os = "windows"))]
+    let output = tokio::process::Command::new("sh")
+        .args(["-c", &command])
+        .current_dir(&project_path)
+        .output()
+        .await
+        .map_err(|e| format!("spawn merge command: {e}"))?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+
+    if !output.status.success() {
+        logging::warn(
+            "merge-pr",
+            &format!("merge failed (exit {:?}): {stderr}", output.status.code()),
+        );
+        let msg = if !stderr.trim().is_empty() {
+            stderr.trim().to_string()
+        } else if !stdout.trim().is_empty() {
+            stdout.trim().to_string()
+        } else {
+            format!("merge exited with status {:?}", output.status.code())
+        };
+        return Err(msg);
+    }
+
+    Ok(if !stdout.trim().is_empty() {
+        stdout.trim().to_string()
+    } else {
+        format!("Merged PR #{number}")
+    })
+}
+
+#[tauri::command]
 async fn resolve_github_base_url(project_path: String) -> Result<Option<String>, String> {
     Ok(git_remote::github_base_url(&project_path).await)
 }
@@ -806,6 +870,7 @@ pub fn run() {
             resolve_github_base_url,
             open_github_pr,
             open_github_issue,
+            merge_pr,
         ])
         .setup(|app| {
             logging::info(

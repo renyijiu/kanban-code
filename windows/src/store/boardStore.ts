@@ -319,3 +319,7 @@ export async function openGithubPr(projectPath: string, number: number): Promise
 export async function openGithubIssue(projectPath: string, number: number): Promise<void> {
   return invoke("open_github_issue", { projectPath, number });
 }
+
+export async function mergePr(projectPath: string, number: number): Promise<string> {
+  return invoke<string>("merge_pr", { projectPath, number });
+}
