@@ -11,6 +11,7 @@ mod git_worktree;
 mod jsonl_parser;
 mod ksuid;
 mod logging;
+mod merge_ops;
 mod pushover;
 mod session_ops;
 mod session_discovery;
@@ -433,6 +434,81 @@ async fn truncate_session(session_path: String, turn_count: usize) -> Result<(),
     session_ops::truncate_session(&session_path, turn_count)
         .await
         .map_err(|e| e.to_string())
+}
+
+/// Merge `source_card_id` into `target_card_id`. Source is deleted; target
+/// absorbs source's optional fields per the rules in [`merge_ops`].
+///
+/// No undo. Callers should confirm intent before invoking.
+#[tauri::command]
+async fn merge_cards(
+    source_card_id: String,
+    target_card_id: String,
+    state: tauri::State<'_, AppState>,
+) -> Result<(), String> {
+    let mut links = state
+        .coordination_store
+        .read_links()
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let source_idx = links
+        .iter()
+        .position(|l| l.id == source_card_id)
+        .ok_or_else(|| format!("source card {source_card_id} not found"))?;
+    let target_idx = links
+        .iter()
+        .position(|l| l.id == target_card_id)
+        .ok_or_else(|| format!("target card {target_card_id} not found"))?;
+
+    if let Some(reason) = merge_ops::merge_blocked(&links[source_idx], &links[target_idx]) {
+        return Err(reason);
+    }
+
+    // Snapshot source. Then mutate target in-place and drop source.
+    let source = links[source_idx].clone();
+
+    // If source has queued prompts the user might lose, log them.
+    if let Some(prompts) = &source.queued_prompts {
+        if !prompts.is_empty() {
+            logging::warn(
+                "merge",
+                &format!(
+                    "dropping {} queued prompt(s) from source card {}",
+                    prompts.len(),
+                    &source.id
+                ),
+            );
+        }
+    }
+
+    merge_ops::merge_into_target(&source, &mut links[target_idx]);
+
+    // Remove source (do this AFTER mutating target since target_idx > source_idx
+    // would shift; use retain to avoid index bookkeeping).
+    let source_id = source.id.clone();
+    links.retain(|l| l.id != source_id);
+
+    state
+        .coordination_store
+        .write_links(&links)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    logging::info(
+        "merge",
+        &format!(
+            "merged {} → {}",
+            short_id(&source_card_id),
+            short_id(&target_card_id)
+        ),
+    );
+
+    Ok(())
+}
+
+fn short_id(id: &str) -> String {
+    id.chars().take(8).collect()
 }
 
 #[tauri::command]
@@ -1110,6 +1186,7 @@ pub fn run() {
             truncate_session,
             discover_projects,
             move_card_to_project,
+            merge_cards,
         ])
         .setup(|app| {
             logging::info(

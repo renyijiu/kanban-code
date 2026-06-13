@@ -34,6 +34,9 @@ interface BoardStore {
   error: string | null;
   selectedProjectPath: string | null;
   viewMode: BoardViewMode;
+  /** Transient UI hint — set by BoardView during DnD to mark the card the
+   *  current drag would merge into. Cleared on drag end. */
+  mergeTargetId: string | null;
 
   // Actions
   refresh: () => Promise<void>;
@@ -55,6 +58,7 @@ interface BoardStore {
   setNewTaskOpen: (open: boolean) => void;
   setSelectedProject: (path: string | null) => void;
   setViewMode: (mode: BoardViewMode) => void;
+  setMergeTargetId: (id: string | null) => void;
   clearError: () => void;
 
   // Computed helpers
@@ -73,6 +77,7 @@ export const useBoardStore = create<BoardStore>((set, get) => ({
   error: null,
   selectedProjectPath: null,
   viewMode: loadViewMode(),
+  mergeTargetId: null,
 
   refresh: async () => {
     set({ isLoading: true, error: null });
@@ -195,6 +200,7 @@ export const useBoardStore = create<BoardStore>((set, get) => ({
     }
     set({ viewMode: mode });
   },
+  setMergeTargetId: (id) => set({ mergeTargetId: id }),
   clearError: () => set({ error: null }),
 
   cardsInColumn: (column) => {
@@ -369,6 +375,28 @@ export async function moveCardToProject(
   targetProjectPath: string
 ): Promise<void> {
   return invoke("move_card_to_project", { cardId, targetProjectPath });
+}
+
+export async function mergeCards(
+  sourceCardId: string,
+  targetCardId: string
+): Promise<void> {
+  return invoke("merge_cards", { sourceCardId, targetCardId });
+}
+
+/** Pure client-side preview of merge_ops.rs::merge_blocked, so the DnD
+ *  overlay only promises a merge the backend will accept. Keep in sync. */
+export function canMergeCards(source: CardDto, target: CardDto): boolean {
+  if (source.id === target.id) return false;
+  if (source.link.isLaunching || target.link.isLaunching) return false;
+  if (source.link.sessionLink && target.link.sessionLink) return false;
+  const sWt = source.link.worktreeLink;
+  const tWt = target.link.worktreeLink;
+  if (sWt && tWt && sWt.path !== tWt.path) return false;
+  const sIss = source.link.issueLink;
+  const tIss = target.link.issueLink;
+  if (sIss && tIss && sIss.number !== tIss.number) return false;
+  return true;
 }
 
 export async function removeWorktree(
