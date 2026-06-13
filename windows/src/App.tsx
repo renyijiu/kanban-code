@@ -86,6 +86,7 @@ export default function App() {
       // Match on physical key location (e.code) AND e.key so non-US
       // keyboard layouts (where "," sits behind shift, etc.) still work.
       const keyLower = e.key.length === 1 ? e.key.toLowerCase() : e.key;
+
       if (mod && (e.code === "KeyK" || keyLower === "k")) {
         e.preventDefault();
         setSearchOpen(true);
@@ -97,7 +98,10 @@ export default function App() {
         return;
       }
       // Ctrl+, (or Cmd+,) — toggle settings, mirroring the macOS app.
-      if (mod && (e.code === "Comma" || keyLower === ",")) {
+      // Multiple matches: physical key location, e.key, deprecated keyCode
+      // (188 = comma). Any one of them triggers, so we're robust to
+      // keyboard layout quirks and platforms that drop e.key under Ctrl.
+      if (mod && (e.code === "Comma" || keyLower === "," || e.keyCode === 188)) {
         e.preventDefault();
         const { settingsOpen: open } = useBoardStore.getState();
         setSettingsOpen(!open);
