@@ -8,6 +8,8 @@ mod coordination_store;
 mod gh_cli;
 mod git_remote;
 mod git_worktree;
+mod hook_event_store;
+mod hook_manager;
 mod jsonl_parser;
 mod ksuid;
 mod logging;
@@ -21,6 +23,7 @@ mod session_discovery;
 mod session_mover;
 mod settings_store;
 mod shell_command;
+mod tmux;
 mod transcript_reader;
 
 use board_state::BoardState;
@@ -1139,6 +1142,56 @@ fn build_tray(app: &tauri::App) -> tauri::Result<()> {
     Ok(())
 }
 
+/// Install the WSL-side hook script + tail `hook-events.jsonl`, re-emitting
+/// each parsed event over the Tauri event bus as `"hook-event"`. The
+/// frontend listens for these to drive activity detection and queued-prompt
+/// auto-send (Phase 3 step 5). Polls at 1s — events are bursty but small.
+fn start_hook_polling(app: tauri::AppHandle) {
+    tauri::async_runtime::spawn(async move {
+        // Install asynchronously so a slow WSL boot doesn't block startup.
+        let state = app.state::<AppState>();
+        match hook_manager::install_if_needed(&state.settings_store).await {
+            Ok(true) => {}
+            Ok(false) => return, // intentionally skipped — no tail loop
+            Err(e) => {
+                logging::warn("hooks", &format!("install failed: {} — tail loop will still run", e));
+            }
+        }
+        drop(state);
+
+        let store = std::sync::Arc::new(hook_event_store::HookEventStore::new());
+        store.touch();
+        // On boot we don't want to re-fire historical events left over from a
+        // previous run — jump straight to the tail.
+        store.skip_to_tail();
+
+        loop {
+            tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+            let store = std::sync::Arc::clone(&store);
+            let events = match tokio::task::spawn_blocking(move || store.read_new_events()).await {
+                Ok(ev) => ev,
+                Err(e) => {
+                    logging::warn("hooks", &format!("blocking read panic: {}", e));
+                    continue;
+                }
+            };
+            for ev in events {
+                logging::debug(
+                    "hooks",
+                    &format!(
+                        "event session={} name={} at={}",
+                        ev.session_id, ev.event_name, ev.timestamp
+                    ),
+                );
+                if let Err(e) = app.emit("hook-event", &ev) {
+                    logging::warn("hooks", &format!("emit failed: {}", e));
+                }
+            }
+        }
+    });
+}
+
+
 // ── Remote / sync commands (Phase 5) ─────────────────────────────────────────
 
 #[tauri::command]
@@ -1273,6 +1326,15 @@ pub fn run() {
             fork_session,
             truncate_session,
             discover_projects,
+            tmux::tmux_available,
+            tmux::tmux_ensure_session,
+            tmux::tmux_send_prompt,
+            tmux::tmux_paste,
+            tmux::tmux_capture,
+            tmux::tmux_kill_session,
+            tmux::tmux_new_window,
+            tmux::tmux_kill_window,
+            tmux::tmux_list_windows,
             move_card_to_project,
             merge_cards,
             remote_prereqs,
@@ -1297,6 +1359,7 @@ pub fn run() {
             start_polling(app.handle().clone());
             start_pr_polling(app.handle().clone());
             start_issue_polling(app.handle().clone());
+            start_hook_polling(app.handle().clone());
             start_remote_polling(app.handle().clone());
 
             // Deploy the remote-shell wrapper at startup (idempotent).

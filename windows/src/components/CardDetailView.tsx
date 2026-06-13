@@ -1,5 +1,7 @@
 import { forwardRef, useEffect, useState, useRef, useCallback } from "react";
 import { ask } from "@tauri-apps/plugin-dialog";
+import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import {
   getTranscript,
   getSettings,
@@ -23,6 +25,7 @@ import type { Turn, TranscriptPage, QueuedPrompt } from "../types";
 import TerminalView from "./Terminal";
 import QueuedPromptDialog from "./QueuedPromptDialog";
 import QueuedPromptsBar from "./QueuedPromptsBar";
+import LaunchConfirmationDialog, { type LaunchFlags } from "./LaunchConfirmationDialog";
 
 type Tab = "terminal" | "history" | "issue" | "pr" | "prompt";
 
@@ -59,6 +62,28 @@ export default function CardDetailView() {
   // Settings
   const [terminalFontSize, setTerminalFontSize] = useState(15);
   const [terminalShell, setTerminalShell] = useState<string>("cmd.exe");
+  // Whether `tmux -V` succeeds in the user's WSL environment. When true AND
+  // the chosen shell is a Unix shell, terminals are wrapped in
+  // `tmux new-session -A -s <ksuid>` so closing the drawer detaches (the
+  // tmux server keeps Claude running) and reopening reattaches with the
+  // pane scrollback intact. When false, the legacy one-shot PTY is used.
+  const [tmuxAvailable, setTmuxAvailable] = useState(false);
+
+  // Launch confirmation: when a fresh-launch card opens its terminal tab, we
+  // show LaunchConfirmationDialog first so the user can tweak the prompt,
+  // toggle --dangerously-skip-permissions, prepend env vars, or hand-edit the
+  // command. Resolved flags drive the inner-command builder below. Resumes
+  // bypass the dialog (no command to choose — `claude --resume <id>`).
+  const [showLaunchDialog, setShowLaunchDialog] = useState(false);
+  const [launchFlags, setLaunchFlags] = useState<LaunchFlags | null>(null);
+
+  // Multi-tab state: each tab is a tmux window inside the card's session.
+  // Window 1 is the "Claude" tab created by Step 2's session-wrap; extra
+  // windows are bare shells the user adds with the "+" button (e.g. for
+  // git/ls work alongside Claude). Indexes match tmux's 1-based window ids.
+  type TmuxWindow = { index: number; name: string; active: boolean };
+  const [terminalTabs, setTerminalTabs] = useState<TmuxWindow[]>([]);
+  const [activeTermTab, setActiveTermTab] = useState<number>(1);
   const [availableProjects, setAvailableProjects] = useState<Project[]>([]);
 
   // Copy / "more" menu
@@ -110,6 +135,9 @@ export default function CardDetailView() {
         setAvailableProjects(s.projects ?? []);
       })
       .catch(() => {});
+    invoke<boolean>("tmux_available")
+      .then((v) => setTmuxAvailable(!!v))
+      .catch(() => setTmuxAvailable(false));
   }, []);
 
   // Reset state when card changes
@@ -275,38 +303,264 @@ export default function CardDetailView() {
   // Split the user-configurable shell string into [exe, ...args]. Default is
   // cmd.exe so the app is Windows-native out of the box; setting it to
   // "wsl.exe" launches Claude inside WSL instead.
-  const shellCommand = terminalShell.trim().split(/\s+/).filter(Boolean);
-  const shellExe = (shellCommand[0] ?? "cmd.exe").toLowerCase();
+  const baseShell = terminalShell.trim().split(/\s+/).filter(Boolean);
+  const shellExe = (baseShell[0] ?? "cmd.exe").toLowerCase();
   const isUnixShell = /(^|[\\/])(wsl|bash|sh|zsh|fish)(\.exe)?$/.test(shellExe);
+  // tmux requires a Unix shell AND a working `tmux -V` inside it.
+  const useTmux = isUnixShell && tmuxAvailable;
 
   const assistantId: AssistantId = (card.link.assistantId ?? "claude") as AssistantId;
   const cli = ASSISTANT_CLI[assistantId] ?? "claude";
 
-  const terminalInput = (() => {
-    if (isUnixShell) {
-      // bash-style: backslash-escape spaces in path, single-quote the prompt.
-      const cdCmd = projectPath ? `cd ${projectPath.replace(/ /g, "\\ ")} && ` : "";
-      return sessionId
-        ? `${cdCmd}${cli} --resume ${sessionId}\r`
-        : `${cdCmd}${cli} '${(promptBody ?? "").replace(/'/g, "'\\''")}'\r`;
+  // Effective prompt + flags after the launch dialog (if shown). For resumes,
+  // the dialog is skipped — launchFlags stays null and the dialog defaults
+  // apply (no skip-perm, no env prefix). The same builder also feeds the
+  // dialog's live preview so what the user sees is what runs.
+  const effectivePrompt = launchFlags?.prompt ?? promptBody ?? "";
+  const effectiveSkipPerm = launchFlags?.dangerouslySkipPermissions ?? false;
+  const effectiveEnv = launchFlags?.envPrefix ?? [];
+
+  const buildInnerBashCmd = useCallback(
+    (
+      cwd: string | undefined,
+      sid: string | null,
+      prompt: string,
+      skipPerm: boolean,
+      env: string[],
+    ) => {
+      const envPrefix = env.length > 0 ? env.join(" ") + " " : "";
+      const cdCmd = cwd ? `cd ${cwd.replace(/ /g, "\\ ")} && ` : "";
+      const skipFlag = skipPerm ? " --dangerously-skip-permissions" : "";
+      return sid
+        ? `${cdCmd}${envPrefix}${cli} --resume ${sid}${skipFlag}`
+        : `${cdCmd}${envPrefix}${cli}${skipFlag} '${prompt.replace(/'/g, "'\\''")}'`;
+    },
+    [cli],
+  );
+
+  const buildInnerCmdShellCmd = useCallback(
+    (
+      cwd: string | undefined,
+      sid: string | null,
+      prompt: string,
+      skipPerm: boolean,
+      env: string[],
+    ) => {
+      // `set VAR=val&&` chains in cmd.exe; pwsh accepts `$env:VAR='val';`,
+      // but cmd is the default — stick with set-style.
+      const envPrefix = env.length > 0 ? env.map((kv) => `set ${kv}&& `).join("") : "";
+      const cdCmd = cwd ? `cd "${cwd}" && ` : "";
+      const skipFlag = skipPerm ? " --dangerously-skip-permissions" : "";
+      return sid
+        ? `${cdCmd}${envPrefix}${cli} --resume ${sid}${skipFlag}`
+        : `${cdCmd}${envPrefix}${cli}${skipFlag} "${prompt.replace(/"/g, '""')}"`;
+    },
+    [cli],
+  );
+
+  // The inner bash command (`cd … && claude …`) — same for tmux + legacy
+  // paths. Inside tmux it's the one-shot session-creation command; outside,
+  // it's typed by Terminal.tsx after 800ms.
+  const innerBashCmd =
+    launchFlags?.commandOverride ??
+    buildInnerBashCmd(projectPath ?? undefined, sessionId ?? null, effectivePrompt, effectiveSkipPerm, effectiveEnv);
+
+  const innerCmdShellCmd =
+    launchFlags?.commandOverride ??
+    buildInnerCmdShellCmd(projectPath ?? undefined, sessionId ?? null, effectivePrompt, effectiveSkipPerm, effectiveEnv);
+
+  // Build the actual argv handed to the PTY + the optional post-spawn
+  // type-this-after-800ms string.
+  //
+  // Tmux mode: PTY runs `wsl bash -lc "tmux new-session -A -s '<ksuid>' …"`.
+  //   * `-A` makes new-session attach if the named session already exists
+  //     and only run the inner shell-command on first create. So a fresh
+  //     PTY on reopen reattaches the existing Claude pane intact.
+  //   * The inner shell-command is encoded as base64 to side-step quoting:
+  //     `bash -lc "$(echo <b64> | base64 -d)"`. Without this, single-quoted
+  //     prompt bodies + multi-level quoting (Windows argv → bash → tmux)
+  //     would break the moment the user types an apostrophe.
+  //   * `; exec bash` keeps the pane alive after Claude exits so the user
+  //     can inspect output / re-run claude without the session dying.
+  //
+  // Legacy mode: existing behavior — spawn the configured shell, then type
+  // the cd + claude line after 800ms via Terminal.tsx's `initialInput`.
+  const tmuxSession = `kanban-${card.id}`;
+  const { shellCommand, terminalInput } = (() => {
+    if (useTmux) {
+      // Unified wrapper for any tab N:
+      //   1. `new-session -A -d` — idempotently create the session and run
+      //      the inner cd+claude on first call (only — `-A` skips creation
+      //      if it already exists). `-d` returns immediately so the next
+      //      tmux call runs.
+      //   2. `select-window -t session:N` — make tab N the active window
+      //      (silent no-op if it doesn't exist yet).
+      //   3. `exec attach-session` — replace the bash shell with the tmux
+      //      client so PTY death closes the client cleanly.
+      const inner = `${innerBashCmd}; exec bash`;
+      const b64 = btoa(unescape(encodeURIComponent(inner)));
+      const wrapper =
+        `tmux new-session -A -d -s '${tmuxSession}' -- bash -lc "$(echo ${b64} | base64 -d)" 2>/dev/null; ` +
+        `tmux select-window -t '${tmuxSession}:${activeTermTab}' 2>/dev/null; ` +
+        `exec tmux attach-session -t '${tmuxSession}'`;
+      return {
+        shellCommand: ["wsl.exe", "--", "bash", "-lc", wrapper],
+        terminalInput: "",
+      };
     }
-    // cmd.exe / pwsh — double-quote the path; "" escapes a quote inside cmd
-    // double-quotes (PowerShell also accepts it).
-    const cdCmd = projectPath ? `cd "${projectPath}" && ` : "";
-    return sessionId
-      ? `${cdCmd}${cli} --resume ${sessionId}\r`
-      : `${cdCmd}${cli} "${(promptBody ?? "").replace(/"/g, '""')}"\r`;
+    if (isUnixShell) {
+      // bash without tmux — fall back to type-after-spawn so non-tmux WSL
+      // users still get a working terminal (just no reattach).
+      return { shellCommand: baseShell, terminalInput: `${innerBashCmd}\r` };
+    }
+    // Native Windows shell.
+    return { shellCommand: baseShell, terminalInput: `${innerCmdShellCmd}\r` };
   })();
 
+  // Pull the current window list whenever the terminal becomes active in
+  // tmux mode. Refreshed manually after add/close — no periodic poll.
+  const refreshTmuxTabs = useCallback(async () => {
+    if (!useTmux) return;
+    try {
+      const wins = await invoke<TmuxWindow[]>("tmux_list_windows", {
+        session: tmuxSession,
+      });
+      setTerminalTabs(wins);
+    } catch {
+      setTerminalTabs([]);
+    }
+  }, [useTmux, tmuxSession]);
+
+  useEffect(() => {
+    if (useTmux && terminalActive) {
+      // Slight delay so the session has time to come up on first launch.
+      const t = setTimeout(refreshTmuxTabs, 800);
+      return () => clearTimeout(t);
+    }
+  }, [useTmux, terminalActive, refreshTmuxTabs, card.id]);
+
+  const handleAddTermTab = async () => {
+    if (!useTmux) return;
+    try {
+      const idx = await invoke<number>("tmux_new_window", {
+        session: tmuxSession,
+        cwdWindows: projectPath ?? null,
+        command: null,
+      });
+      setActiveTermTab(idx);
+      await refreshTmuxTabs();
+    } catch (e) {
+      useBoardStore.setState({ error: String(e) });
+    }
+  };
+
+  // ── Hook-driven queued-prompt auto-send ────────────────────────────────────
+  // Mirrors the macOS `BackgroundOrchestrator.autoSendQueuedPrompt` flow:
+  // when Claude fires a `Stop` hook event for THIS card's session, wait
+  // ~1s, and if the user hasn't typed a new prompt during that window,
+  // send the first queued prompt where `sendAutomatically` is true. A
+  // 62-second dedup window on each prompt id prevents a flapping Stop
+  // event (e.g. a quick second tool call) from double-sending.
+  //
+  // Refs not state — these change continuously and shouldn't trigger
+  // re-renders.
+  const lastUserPromptAt = useRef<number>(0);
+  const recentlyAutoSent = useRef<Map<string, number>>(new Map());
+
+  useEffect(() => {
+    if (!card) return;
+    const sessId = card.link.sessionLink?.sessionId;
+    if (!sessId) return;
+    let cancelled = false;
+    let pending: ReturnType<typeof setTimeout> | null = null;
+    const unsubP = listen<{
+      sessionId: string;
+      eventName: string;
+      transcriptPath: string | null;
+      notificationType: string | null;
+      timestamp: string;
+    }>("hook-event", (ev) => {
+      if (cancelled) return;
+      const p = ev.payload;
+      if (!p || p.sessionId !== sessId) return;
+      if (p.eventName === "UserPromptSubmit") {
+        lastUserPromptAt.current = Date.now();
+        return;
+      }
+      if (p.eventName !== "Stop") return;
+      const stopAt = Date.now();
+      if (pending) clearTimeout(pending);
+      pending = setTimeout(() => {
+        // User typed in the meantime — back off.
+        if (Date.now() - lastUserPromptAt.current < 1100) return;
+        // Resolve the freshest queue from the store (closure value would be
+        // stale by the time the timer fires).
+        const fresh = useBoardStore.getState().cards.find((c) => c.id === card.id)?.link
+          .queuedPrompts ?? queuedPrompts;
+        const now = Date.now();
+        const target = fresh.find(
+          (qp) =>
+            qp.sendAutomatically &&
+            (recentlyAutoSent.current.get(qp.id) ?? 0) + 62_000 < now,
+        );
+        if (!target || !terminalWriteRef.current) return;
+        terminalWriteRef.current(target.body + "\r");
+        recentlyAutoSent.current.set(target.id, now);
+        // Garbage-collect dedup entries older than 5 minutes.
+        for (const [id, at] of recentlyAutoSent.current) {
+          if (now - at > 5 * 60_000) recentlyAutoSent.current.delete(id);
+        }
+        removeQueuedPrompt(card.id, target.id)
+          .then(() =>
+            setQueuedPrompts((prev) => prev.filter((p) => p.id !== target.id)),
+          )
+          .catch(() => {});
+      }, 1000);
+      // suppress "unused" lint
+      void stopAt;
+    });
+
+    return () => {
+      cancelled = true;
+      if (pending) clearTimeout(pending);
+      unsubP.then((unsub) => unsub()).catch(() => {});
+    };
+  }, [card?.id, card?.link.sessionLink?.sessionId]);
+
+  const handleCloseTermTab = async (idx: number) => {
+    if (!useTmux) return;
+    // Don't let the user kill the main Claude tab — it's tied to the
+    // session lifecycle and would force a full relaunch.
+    if (idx === 1) return;
+    try {
+      await invoke("tmux_kill_window", {
+        target: `${tmuxSession}:${idx}`,
+      });
+      if (activeTermTab === idx) setActiveTermTab(1);
+      await refreshTmuxTabs();
+    } catch (e) {
+      useBoardStore.setState({ error: String(e) });
+    }
+  };
+
   const handleStartTerminal = () => {
-    setTerminalActive(true);
+    // Resumes — no choices to make, jump straight in.
+    if (sessionId) {
+      setTerminalActive(true);
+      setActiveTab("terminal");
+      return;
+    }
+    // Fresh launch — let the user review the command first.
+    setShowLaunchDialog(true);
     setActiveTab("terminal");
   };
 
-  // Auto-start terminal for freshly created tasks
+  // Auto-open the launch dialog for freshly created tasks so the user sees
+  // the command preview before Claude starts churning. They can cancel out.
   useEffect(() => {
-    if (!sessionId && promptBody && !terminalActive) {
-      handleStartTerminal();
+    if (!sessionId && promptBody && !terminalActive && !showLaunchDialog && !launchFlags) {
+      setShowLaunchDialog(true);
+      setActiveTab("terminal");
     }
   }, [card.id]);
 
@@ -607,8 +861,55 @@ export default function CardDetailView() {
                 onEdit={handleEditPrompt}
                 onRemove={handleRemovePrompt}
               />
+              {useTmux && terminalTabs.length > 0 && (
+                <div
+                  className="flex items-center gap-1 px-2 py-1 shrink-0"
+                  style={{ background: "#0a0a0c", borderBottom: `1px solid ${c.border}` }}
+                >
+                  {terminalTabs.map((w) => {
+                    const isActive = w.index === activeTermTab;
+                    return (
+                      <div
+                        key={w.index}
+                        className="flex items-center gap-1 rounded px-2 py-0.5 text-[11px] cursor-pointer transition-colors"
+                        style={{
+                          background: isActive ? "#1a1a1f" : "transparent",
+                          color: isActive ? "#e4e4e7" : "#6b7280",
+                        }}
+                        onClick={() => setActiveTermTab(w.index)}
+                        title={w.name}
+                      >
+                        <span>
+                          {w.index === 1 ? "Claude" : w.name || `tab ${w.index}`}
+                        </span>
+                        {w.index !== 1 && (
+                          <button
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              handleCloseTermTab(w.index);
+                            }}
+                            className="opacity-60 hover:opacity-100 ml-1"
+                            style={{ color: "#9ca3af" }}
+                            title="Close tab"
+                          >
+                            ×
+                          </button>
+                        )}
+                      </div>
+                    );
+                  })}
+                  <button
+                    onClick={handleAddTermTab}
+                    className="ml-1 rounded px-2 py-0.5 text-[11px] hover:opacity-100"
+                    style={{ color: "#6b7280", background: "transparent" }}
+                    title="New shell tab"
+                  >
+                    +
+                  </button>
+                </div>
+              )}
               <TerminalView
-                ptyId={`term-${card.id}`}
+                ptyId={`term-${card.id}-${activeTermTab}`}
                 command={shellCommand}
                 initialInput={terminalInput}
                 onExit={() => {}}
@@ -725,6 +1026,27 @@ export default function CardDetailView() {
         editBody={editingPrompt?.body}
         editSendAuto={editingPrompt?.sendAutomatically}
       />
+
+      {/* Launch confirmation dialog (fresh launches only) */}
+      {showLaunchDialog && projectPath && (
+        <LaunchConfirmationDialog
+          projectPath={projectPath}
+          initialPrompt={promptBody ?? ""}
+          canCreateWorktree={false}
+          initialSkipPermissions={false}
+          buildCommand={(f) =>
+            isUnixShell
+              ? buildInnerBashCmd(projectPath, sessionId ?? null, f.prompt, f.dangerouslySkipPermissions, f.envPrefix)
+              : buildInnerCmdShellCmd(projectPath, sessionId ?? null, f.prompt, f.dangerouslySkipPermissions, f.envPrefix)
+          }
+          onLaunch={(flags) => {
+            setLaunchFlags(flags);
+            setShowLaunchDialog(false);
+            setTerminalActive(true);
+          }}
+          onCancel={() => setShowLaunchDialog(false)}
+        />
+      )}
     </div>
   );
 }
