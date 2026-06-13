@@ -323,3 +323,25 @@ export async function openGithubIssue(projectPath: string, number: number): Prom
 export async function mergePr(projectPath: string, number: number): Promise<string> {
   return invoke<string>("merge_pr", { projectPath, number });
 }
+
+export interface WorktreeInfo {
+  path: string;
+  branch?: string;
+  isMain: boolean;
+}
+
+export async function listWorktrees(repoRoot: string): Promise<WorktreeInfo[]> {
+  return invoke<WorktreeInfo[]>("list_worktrees", { repoRoot });
+}
+
+export async function createWorktree(repoRoot: string, name: string): Promise<WorktreeInfo> {
+  return invoke<WorktreeInfo>("create_worktree", { repoRoot, name });
+}
+
+export async function removeWorktree(
+  path: string,
+  repoRoot: string | null,
+  force: boolean
+): Promise<void> {
+  return invoke("remove_worktree", { path, repoRoot, force });
+}

@@ -333,6 +333,27 @@ async fn gh_is_authed() -> bool {
 }
 
 #[tauri::command]
+async fn list_worktrees(repo_root: String) -> Result<Vec<git_worktree::Worktree>, String> {
+    git_worktree::list_worktrees(&repo_root)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn create_worktree(repo_root: String, name: String) -> Result<git_worktree::Worktree, String> {
+    git_worktree::create_worktree(&repo_root, &name)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn remove_worktree(path: String, repo_root: Option<String>, force: bool) -> Result<(), String> {
+    git_worktree::remove_worktree(&path, repo_root.as_deref(), force)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 async fn merge_pr(
     project_path: String,
     number: i64,
@@ -910,6 +931,9 @@ pub fn run() {
             open_github_pr,
             open_github_issue,
             merge_pr,
+            list_worktrees,
+            create_worktree,
+            remove_worktree,
         ])
         .setup(|app| {
             logging::info(

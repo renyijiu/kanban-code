@@ -2,6 +2,7 @@ use crate::activity_detector::{ActivityState, ActivityTracker};
 use crate::assign_column::update_card_column;
 use crate::card_reconciler::reconcile;
 use crate::coordination_store::{CoordinationStore, Link};
+use crate::git_worktree;
 use crate::session_discovery::{Session, SessionDiscovery};
 use crate::settings_store::SettingsStore;
 use anyhow::Result;
@@ -61,6 +62,12 @@ impl BoardState {
 
         // --- Reconcile: merge sessions into links without duplicates ---
         let mut all_links = reconcile(existing_links.clone(), sessions.clone());
+
+        // --- Backfill worktree paths from `git worktree list` ---
+        // Cards with a branch but a missing/empty path get matched against
+        // the project's actual worktrees so the UI can show the real on-disk
+        // location and the cleanup-from-Done flow has something to operate on.
+        backfill_worktree_paths(&mut all_links).await;
 
         // --- Detect activity once per session, cache results ---
         let sessions_by_id: HashMap<String, Session> =
@@ -200,6 +207,41 @@ impl BoardState {
 
         self.prev_activity = new_states;
         notify
+    }
+}
+
+/// Match each card's worktree_link.branch against the actual git worktrees
+/// in its project, filling in `worktree_link.path` when missing. Skips cards
+/// without a project_path or without a branch; bails on git failures (no
+/// worktree info isn't fatal). Worktrees are listed at most once per
+/// project_root so the polling loop doesn't fork git N times for one repo.
+async fn backfill_worktree_paths(links: &mut [Link]) {
+    use std::collections::HashMap;
+
+    let project_roots: std::collections::HashSet<String> = links
+        .iter()
+        .filter_map(|l| l.project_path.clone())
+        .collect();
+
+    let mut worktrees_by_root: HashMap<String, Vec<git_worktree::Worktree>> = HashMap::new();
+    for root in project_roots {
+        if let Ok(list) = git_worktree::list_worktrees(&root).await {
+            worktrees_by_root.insert(root, list);
+        }
+    }
+
+    for link in links.iter_mut() {
+        let Some(project) = link.project_path.as_deref() else { continue };
+        let Some(wt) = link.worktree_link.as_mut() else { continue };
+        let Some(branch) = wt.branch.as_deref() else { continue };
+        if !wt.path.is_empty() {
+            continue;
+        }
+        if let Some(matches) = worktrees_by_root.get(project) {
+            if let Some(found) = matches.iter().find(|w| w.branch.as_deref() == Some(branch)) {
+                wt.path = found.path.clone();
+            }
+        }
     }
 }
 
