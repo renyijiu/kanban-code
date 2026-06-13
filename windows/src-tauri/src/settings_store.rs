@@ -83,6 +83,23 @@ impl Default for NotificationSettings {
     }
 }
 
+/// Byte-compatible with macOS `RemoteSettings` (Sources/.../SettingsStore.swift).
+/// Field names — `host`, `remotePath`, `localPath`, `syncIgnores` — match exactly
+/// so a settings.json moved between Mac and Windows keeps working.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteSettings {
+    #[serde(default)]
+    pub host: String,
+    #[serde(default)]
+    pub remote_path: String,
+    #[serde(default)]
+    pub local_path: String,
+    /// nil = use mutagen::default_ignores()
+    #[serde(default)]
+    pub sync_ignores: Option<Vec<String>>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionTimeoutSettings {
@@ -133,6 +150,8 @@ pub struct Settings {
     /// shell. The first token is the executable; remaining tokens are args.
     #[serde(default = "default_terminal_shell")]
     pub terminal_shell: String,
+    #[serde(default)]
+    pub remote: Option<RemoteSettings>,
 }
 
 fn default_terminal_font_size() -> u32 {

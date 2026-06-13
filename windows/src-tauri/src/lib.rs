@@ -10,7 +10,10 @@ mod git_worktree;
 mod jsonl_parser;
 mod ksuid;
 mod logging;
+mod mutagen;
 mod pushover;
+mod remote_shell;
+mod remote_status;
 mod session_ops;
 mod session_discovery;
 mod settings_store;
@@ -993,6 +996,91 @@ fn build_tray(app: &tauri::App) -> tauri::Result<()> {
     Ok(())
 }
 
+// ── Remote / sync commands (Phase 5) ─────────────────────────────────────────
+
+#[tauri::command]
+async fn remote_prereqs() -> Result<remote_shell::RemotePrereqs, String> {
+    Ok(remote_shell::prereqs())
+}
+
+#[tauri::command]
+async fn remote_deploy_shell() -> Result<(), String> {
+    remote_shell::deploy().await.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn mutagen_status() -> Result<mutagen::SyncStatus, String> {
+    Ok(mutagen::status().await)
+}
+
+#[tauri::command]
+async fn mutagen_raw_status() -> Result<String, String> {
+    mutagen::raw_status().await.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn mutagen_start(
+    state: tauri::State<'_, AppState>,
+) -> Result<(), String> {
+    let settings = state.settings_store.read().await.map_err(|e| e.to_string())?;
+    let Some(remote) = settings.remote.as_ref() else {
+        return Err("Remote settings not configured".to_string());
+    };
+    if remote.host.is_empty() || remote.remote_path.is_empty() || remote.local_path.is_empty() {
+        return Err("Remote host / remotePath / localPath must all be set".to_string());
+    }
+    let ignores = remote
+        .sync_ignores
+        .clone()
+        .unwrap_or_else(mutagen::default_ignores);
+
+    mutagen::ensure_daemon().await;
+    mutagen::start_sync(&remote.local_path, &remote.host, &remote.remote_path, &ignores)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn mutagen_stop() -> Result<(), String> {
+    mutagen::stop_sync().await.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn mutagen_reset() -> Result<(), String> {
+    mutagen::reset_sync().await.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn mutagen_flush() -> Result<(), String> {
+    mutagen::flush_sync().await.map_err(|e| e.to_string())
+}
+
+fn start_remote_polling(app: tauri::AppHandle) {
+    tauri::async_runtime::spawn(async move {
+        let watcher = remote_status::RemoteStatusWatcher::new();
+        let _ = tokio::fs::create_dir_all(watcher.state_dir()).await;
+        let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(5));
+        let mut last_status: Option<mutagen::SyncStatus> = None;
+        loop {
+            interval.tick().await;
+
+            let status = mutagen::status().await;
+            let changed = match (&last_status, &status) {
+                (Some(prev), curr) => prev.kind != curr.kind || prev.conflict_count != curr.conflict_count,
+                (None, _) => true,
+            };
+            if changed {
+                let _ = app.emit("sync_status_event", &status);
+                last_status = Some(status);
+            }
+
+            for change in watcher.poll().await {
+                let _ = app.emit("remote_status_changed", &change);
+            }
+        }
+    });
+}
+
 // ── Entry point ──────────────────────────────────────────────────────────────
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -1042,6 +1130,14 @@ pub fn run() {
             fork_session,
             truncate_session,
             discover_projects,
+            remote_prereqs,
+            remote_deploy_shell,
+            mutagen_status,
+            mutagen_raw_status,
+            mutagen_start,
+            mutagen_stop,
+            mutagen_reset,
+            mutagen_flush,
         ])
         .setup(|app| {
             logging::info(
@@ -1056,6 +1152,14 @@ pub fn run() {
             start_polling(app.handle().clone());
             start_pr_polling(app.handle().clone());
             start_issue_polling(app.handle().clone());
+            start_remote_polling(app.handle().clone());
+
+            // Deploy the remote-shell wrapper at startup (idempotent).
+            tauri::async_runtime::spawn(async {
+                if let Err(e) = remote_shell::deploy().await {
+                    logging::warn("startup", &format!("remote-shell deploy failed: {e}"));
+                }
+            });
             Ok(())
         })
         .run(tauri::generate_context!())

@@ -7,8 +7,11 @@ import type {
   DependencyStatus,
   KanbanColumn,
   QueuedPrompt,
+  RemoteHostStatus,
+  RemotePrereqs,
   Session,
   Settings,
+  SyncStatus,
   TranscriptPage,
 } from "../types";
 
@@ -23,6 +26,7 @@ interface BoardStore {
   lastRefresh: string | null;
   error: string | null;
   selectedProjectPath: string | null;
+  syncStatus: SyncStatus;
 
   // Actions
   refresh: () => Promise<void>;
@@ -58,6 +62,7 @@ export const useBoardStore = create<BoardStore>((set, get) => ({
   isLoading: false,
   lastRefresh: null,
   error: null,
+  syncStatus: { kind: "disabled", conflictCount: 0 },
   selectedProjectPath: null,
 
   refresh: async () => {
@@ -240,6 +245,14 @@ export function initBoardEventListener() {
       lastRefresh: event.payload.lastRefresh ?? null,
     });
   });
+  listen<SyncStatus>("sync_status_event", (event) => {
+    useBoardStore.setState({ syncStatus: event.payload });
+  });
+  listen<RemoteHostStatus>("remote_status_changed", (event) => {
+    // Surface as a non-blocking toast via the OS notification path the
+    // backend already owns — we just log here so the dev tools show it.
+    console.info("remote host status change", event.payload);
+  });
 }
 
 // Tauri command wrappers
@@ -359,4 +372,38 @@ export async function discoverProjects(): Promise<string[]> {
 /** Truncate a session .jsonl to keep only the first `turnCount` user/assistant turns. */
 export async function truncateSession(sessionPath: string, turnCount: number): Promise<void> {
   return invoke("truncate_session", { sessionPath, turnCount });
+}
+
+// ── Remote / sync (Phase 5) ──────────────────────────────────────────────────
+
+export async function remotePrereqs(): Promise<RemotePrereqs> {
+  return invoke<RemotePrereqs>("remote_prereqs");
+}
+
+export async function remoteDeployShell(): Promise<void> {
+  return invoke("remote_deploy_shell");
+}
+
+export async function mutagenStatus(): Promise<SyncStatus> {
+  return invoke<SyncStatus>("mutagen_status");
+}
+
+export async function mutagenRawStatus(): Promise<string> {
+  return invoke<string>("mutagen_raw_status");
+}
+
+export async function mutagenStart(): Promise<void> {
+  return invoke("mutagen_start");
+}
+
+export async function mutagenStop(): Promise<void> {
+  return invoke("mutagen_stop");
+}
+
+export async function mutagenReset(): Promise<void> {
+  return invoke("mutagen_reset");
+}
+
+export async function mutagenFlush(): Promise<void> {
+  return invoke("mutagen_flush");
 }
