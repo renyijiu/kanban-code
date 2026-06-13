@@ -1,6 +1,7 @@
 use anyhow::{anyhow, Context, Result};
 use chrono::Utc;
 use std::collections::BTreeMap;
+use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use tokio::fs;
 use tokio::io::AsyncWriteExt;
@@ -462,6 +463,13 @@ impl ChannelsStore {
     }
 
     async fn read_jsonl(path: &Path, limit: Option<usize>) -> Result<Vec<ChannelMessage>> {
+        match limit {
+            None => Self::read_jsonl_all(path).await,
+            Some(n) => Self::read_jsonl_tail(path, n).await,
+        }
+    }
+
+    async fn read_jsonl_all(path: &Path) -> Result<Vec<ChannelMessage>> {
         let bytes = match fs::read(path).await {
             Ok(b) => b,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
@@ -477,12 +485,124 @@ impl ChannelsStore {
             }
             // Silently skip corrupt lines — matches Swift/TS leniency.
         }
-        if let Some(n) = limit {
-            if msgs.len() > n {
-                msgs.drain(0..msgs.len() - n);
+        Ok(msgs)
+    }
+
+    /// Reverse-tail reader: walks back from EOF in 64 KB chunks until `n`
+    /// complete lines are accumulated (or BOF). Memory is O(n × avg_line)
+    /// for typical messages, with `pending` growing only when a single line
+    /// exceeds the chunk size. See #114.
+    async fn read_jsonl_tail(path: &Path, n: usize) -> Result<Vec<ChannelMessage>> {
+        if n == 0 { return Ok(Vec::new()); }
+        let path_buf = path.to_path_buf();
+        let lines = tokio::task::spawn_blocking(move || -> Result<Vec<String>> {
+            let mut file = match std::fs::File::open(&path_buf) {
+                Ok(f) => f,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+                Err(e) => return Err(e.into()),
+            };
+            let size = file.seek(SeekFrom::End(0))?;
+            if size == 0 { return Ok(Vec::new()); }
+
+            const CHUNK_SIZE: u64 = 64 * 1024;
+            let mut pos: u64 = size;
+            // Tail bytes of an in-progress line whose terminating '\n' lives
+            // in a chunk we've already processed (later in the file).
+            let mut pending = Vec::<u8>::new();
+            let mut lines: Vec<String> = Vec::with_capacity(n);
+
+            'outer: while pos > 0 {
+                let read_size = CHUNK_SIZE.min(pos);
+                let read_from = pos - read_size;
+                file.seek(SeekFrom::Start(read_from))?;
+                let mut new_chunk = vec![0u8; read_size as usize];
+                file.read_exact(&mut new_chunk)?;
+                pos = read_from;
+                let reached_bof = pos == 0;
+
+                // Indices of '\n' bytes within new_chunk (earliest first).
+                let nl_positions: Vec<usize> = new_chunk
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(i, b)| (*b == b'\n').then_some(i))
+                    .collect();
+
+                if nl_positions.is_empty() {
+                    // Whole chunk is body of an in-progress line — prepend
+                    // to pending. At BOF that's the complete first line.
+                    let mut combined = new_chunk;
+                    combined.extend_from_slice(&pending);
+                    if reached_bof {
+                        push_line(&mut lines, &combined);
+                        if lines.len() >= n { break 'outer; }
+                    } else {
+                        pending = combined;
+                    }
+                    continue;
+                }
+
+                let first_nl = *nl_positions.first().unwrap();
+                let last_nl = *nl_positions.last().unwrap();
+
+                // Bytes after the last '\n' + pending form one complete line
+                // (its terminator was consumed in a previous iter, or, on
+                // the very first chunk of an unterminated file, it's the
+                // no-terminator trailing line).
+                let trailing = &new_chunk[last_nl + 1..];
+                if !trailing.is_empty() || !pending.is_empty() {
+                    let mut combined = trailing.to_vec();
+                    combined.extend_from_slice(&pending);
+                    push_line(&mut lines, &combined);
+                    if lines.len() >= n { break 'outer; }
+                }
+                pending.clear();
+
+                // Interior complete lines (between consecutive '\n's),
+                // newest first.
+                for w in nl_positions.windows(2).rev() {
+                    let s = w[0] + 1;
+                    let e = w[1];
+                    if e > s {
+                        push_line(&mut lines, &new_chunk[s..e]);
+                        if lines.len() >= n { break 'outer; }
+                    }
+                }
+
+                // Bytes before the first '\n' are the tail of a line whose
+                // head is in an even earlier chunk — save as pending. At
+                // BOF they're a complete line.
+                let head = &new_chunk[..first_nl];
+                if reached_bof {
+                    if !head.is_empty() {
+                        push_line(&mut lines, head);
+                        if lines.len() >= n { break 'outer; }
+                    }
+                } else if !head.is_empty() {
+                    pending = head.to_vec();
+                }
+            }
+
+            Ok(lines)
+        })
+        .await
+        .context("spawn_blocking read_jsonl_tail")??;
+
+        // `lines` is newest-first. Walk in chronological order, parsing
+        // leniently — corrupt lines are dropped (matches the whole-file path).
+        let mut msgs: Vec<ChannelMessage> = Vec::with_capacity(lines.len());
+        for line in lines.into_iter().rev() {
+            if let Ok(m) = serde_json::from_str::<ChannelMessage>(&line) {
+                msgs.push(m);
             }
         }
         Ok(msgs)
+    }
+}
+
+fn push_line(lines: &mut Vec<String>, bytes: &[u8]) {
+    let s = String::from_utf8_lossy(bytes).trim().to_string();
+    if !s.is_empty() {
+        lines.push(s);
     }
 }
 
@@ -672,6 +792,164 @@ mod tests {
         let channels = store.load_channels().await.unwrap();
         assert_eq!(channels.len(), 1);
         assert_eq!(channels[0].name, "general");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    // ── #114 chunked reverse-tail ────────────────────────────────────────
+
+    fn synthetic_jsonl_line(idx: usize) -> String {
+        format!(
+            r#"{{"id":"msg_{idx:08x}","ts":"2024-01-15T12:34:56.789Z","from":{{"cardId":null,"handle":"user"}},"body":"line {idx}","type":"message"}}"#
+        )
+    }
+
+    #[tokio::test]
+    async fn read_tail_empty_file() {
+        let base = tmp_base();
+        std::fs::create_dir_all(&base).unwrap();
+        let path = base.join("empty.jsonl");
+        std::fs::write(&path, b"").unwrap();
+        let msgs = ChannelsStore::read_jsonl(&path, Some(10)).await.unwrap();
+        assert!(msgs.is_empty());
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[tokio::test]
+    async fn read_tail_missing_file_is_empty() {
+        let base = tmp_base();
+        let path = base.join("ghost.jsonl");
+        let msgs = ChannelsStore::read_jsonl(&path, Some(10)).await.unwrap();
+        assert!(msgs.is_empty());
+    }
+
+    #[tokio::test]
+    async fn read_tail_fewer_than_n() {
+        let base = tmp_base();
+        std::fs::create_dir_all(&base).unwrap();
+        let path = base.join("few.jsonl");
+        let lines: String = (0..3).map(|i| format!("{}\n", synthetic_jsonl_line(i))).collect();
+        std::fs::write(&path, lines).unwrap();
+        let msgs = ChannelsStore::read_jsonl(&path, Some(10)).await.unwrap();
+        assert_eq!(msgs.len(), 3);
+        assert_eq!(msgs[0].body, "line 0");
+        assert_eq!(msgs[2].body, "line 2");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[tokio::test]
+    async fn read_tail_exactly_n() {
+        let base = tmp_base();
+        std::fs::create_dir_all(&base).unwrap();
+        let path = base.join("exact.jsonl");
+        let lines: String = (0..5).map(|i| format!("{}\n", synthetic_jsonl_line(i))).collect();
+        std::fs::write(&path, lines).unwrap();
+        let msgs = ChannelsStore::read_jsonl(&path, Some(5)).await.unwrap();
+        assert_eq!(msgs.len(), 5);
+        assert_eq!(msgs[0].body, "line 0");
+        assert_eq!(msgs[4].body, "line 4");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[tokio::test]
+    async fn read_tail_many_more_than_n() {
+        let base = tmp_base();
+        std::fs::create_dir_all(&base).unwrap();
+        let path = base.join("many.jsonl");
+        let lines: String = (0..1000).map(|i| format!("{}\n", synthetic_jsonl_line(i))).collect();
+        std::fs::write(&path, lines).unwrap();
+        let msgs = ChannelsStore::read_jsonl(&path, Some(20)).await.unwrap();
+        assert_eq!(msgs.len(), 20);
+        // Last 20 messages, in chronological order.
+        assert_eq!(msgs[0].body, "line 980");
+        assert_eq!(msgs[19].body, "line 999");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[tokio::test]
+    async fn read_tail_oversized_single_line() {
+        // One line bigger than the 64 KB chunk; verify pending grows.
+        let base = tmp_base();
+        std::fs::create_dir_all(&base).unwrap();
+        let path = base.join("huge.jsonl");
+        let big_body = "x".repeat(200_000);
+        let huge_line = format!(
+            r#"{{"id":"msg_huge","ts":"2024-01-15T12:34:56.789Z","from":{{"cardId":null,"handle":"user"}},"body":"{big_body}","type":"message"}}"#
+        );
+        let content = format!("{}\n{}\n", synthetic_jsonl_line(0), huge_line);
+        std::fs::write(&path, content).unwrap();
+        let msgs = ChannelsStore::read_jsonl(&path, Some(1)).await.unwrap();
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(msgs[0].id, "msg_huge");
+        assert_eq!(msgs[0].body.len(), 200_000);
+        let msgs2 = ChannelsStore::read_jsonl(&path, Some(2)).await.unwrap();
+        assert_eq!(msgs2.len(), 2);
+        assert_eq!(msgs2[0].body, "line 0");
+        assert_eq!(msgs2[1].id, "msg_huge");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[tokio::test]
+    async fn read_tail_skips_corrupt_lines() {
+        let base = tmp_base();
+        std::fs::create_dir_all(&base).unwrap();
+        let path = base.join("corrupt.jsonl");
+        let content = format!(
+            "{}\n{}\n{}\n{}\n",
+            synthetic_jsonl_line(0),
+            "<not valid json at all>",
+            synthetic_jsonl_line(1),
+            "{ \"id\": \"oops\", broken",
+        );
+        std::fs::write(&path, content).unwrap();
+        let msgs = ChannelsStore::read_jsonl(&path, Some(10)).await.unwrap();
+        // Only the two well-formed rows survive.
+        assert_eq!(msgs.len(), 2);
+        assert_eq!(msgs[0].body, "line 0");
+        assert_eq!(msgs[1].body, "line 1");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[tokio::test]
+    async fn read_tail_matches_whole_file_for_small_files() {
+        // No-limit path is independent; verify the tail path agrees with it
+        // on every line of a small file.
+        let base = tmp_base();
+        std::fs::create_dir_all(&base).unwrap();
+        let path = base.join("small.jsonl");
+        let lines: String = (0..7).map(|i| format!("{}\n", synthetic_jsonl_line(i))).collect();
+        std::fs::write(&path, lines).unwrap();
+        let all = ChannelsStore::read_jsonl(&path, None).await.unwrap();
+        let tail = ChannelsStore::read_jsonl(&path, Some(7)).await.unwrap();
+        assert_eq!(all.len(), 7);
+        assert_eq!(tail.len(), 7);
+        for (a, b) in all.iter().zip(tail.iter()) {
+            assert_eq!(a.id, b.id);
+            assert_eq!(a.body, b.body);
+        }
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[tokio::test]
+    async fn read_tail_handles_chunk_boundary_at_newline() {
+        // Construct a file where the line offsets straddle the 64 KB chunk
+        // boundary so the reverse walker has to stitch lines together
+        // across chunks.
+        let base = tmp_base();
+        std::fs::create_dir_all(&base).unwrap();
+        let path = base.join("boundary.jsonl");
+        // ~80 KB of content with varying line lengths
+        let mut content = String::new();
+        for i in 0..2000 {
+            content.push_str(&synthetic_jsonl_line(i));
+            content.push('\n');
+        }
+        std::fs::write(&path, &content).unwrap();
+        let tail50 = ChannelsStore::read_jsonl(&path, Some(50)).await.unwrap();
+        assert_eq!(tail50.len(), 50);
+        assert_eq!(tail50[0].body, "line 1950");
+        assert_eq!(tail50[49].body, "line 1999");
+        let all = ChannelsStore::read_jsonl(&path, None).await.unwrap();
+        assert_eq!(all.len(), 2000);
         let _ = std::fs::remove_dir_all(&base);
     }
 
