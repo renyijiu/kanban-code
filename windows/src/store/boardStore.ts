@@ -58,7 +58,8 @@ interface BoardStore {
     title: string | null,
     project: string,
     launch?: boolean,
-    assistantId?: string
+    assistantId?: string,
+    promptImagePaths?: string[]
   ) => Promise<string | null>;
   setSearchOpen: (open: boolean) => void;
   setSettingsOpen: (open: boolean) => void;
@@ -230,7 +231,7 @@ export const useBoardStore = create<BoardStore>((set, get) => ({
     );
   },
 
-  createCard: async (prompt, title, project, launch = false, assistantId) => {
+  createCard: async (prompt, title, project, launch = false, assistantId, promptImagePaths) => {
     try {
       const link = await invoke<{ id: string }>("create_card", {
         prompt,
@@ -238,6 +239,7 @@ export const useBoardStore = create<BoardStore>((set, get) => ({
         project,
         launch,
         assistantId: assistantId ?? null,
+        promptImagePaths: promptImagePaths && promptImagePaths.length > 0 ? promptImagePaths : null,
       });
       await get().refresh();
       return link.id;
@@ -405,9 +407,21 @@ export async function openInEditor(
 export async function addQueuedPrompt(
   cardId: string,
   body: string,
-  sendAutomatically: boolean
+  sendAutomatically: boolean,
+  imagePaths?: string[]
 ): Promise<QueuedPrompt> {
-  return invoke<QueuedPrompt>("add_queued_prompt", { cardId, body, sendAutomatically });
+  return invoke<QueuedPrompt>("add_queued_prompt", {
+    cardId,
+    body,
+    sendAutomatically,
+    imagePaths: imagePaths && imagePaths.length > 0 ? imagePaths : null,
+  });
+}
+
+/** Persist clipboard image bytes to disk under <data_dir>/images/, returning
+ *  the absolute path to stash into Link.promptImagePaths / imagePaths. */
+export async function saveClipboardImage(bytes: Uint8Array): Promise<string> {
+  return invoke<string>("save_clipboard_image", { bytes: Array.from(bytes) });
 }
 
 export async function updateQueuedPrompt(

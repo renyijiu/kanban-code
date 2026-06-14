@@ -1,20 +1,24 @@
 import { useState, useEffect, useRef } from "react";
 import { useTheme, t } from "../theme";
+import { saveClipboardImage, useBoardStore } from "../store/boardStore";
+import { imageMarker } from "../lib/promptImageLayout";
 
 interface Props {
   open: boolean;
   onClose: () => void;
-  onSave: (body: string, sendAutomatically: boolean) => void;
+  onSave: (body: string, sendAutomatically: boolean, imagePaths?: string[]) => void;
   /** If set, we're editing an existing prompt */
   editBody?: string;
   editSendAuto?: boolean;
+  editImagePaths?: string[];
 }
 
-export default function QueuedPromptDialog({ open, onClose, onSave, editBody, editSendAuto }: Props) {
+export default function QueuedPromptDialog({ open, onClose, onSave, editBody, editSendAuto, editImagePaths }: Props) {
   const { theme } = useTheme();
   const c = t(theme);
   const [body, setBody] = useState("");
   const [sendAuto, setSendAuto] = useState(true);
+  const [imagePaths, setImagePaths] = useState<string[]>([]);
   const textRef = useRef<HTMLTextAreaElement>(null);
   const isEdit = editBody !== undefined;
 
@@ -22,6 +26,7 @@ export default function QueuedPromptDialog({ open, onClose, onSave, editBody, ed
     if (open) {
       setBody(editBody ?? "");
       setSendAuto(editSendAuto ?? true);
+      setImagePaths(editImagePaths ?? []);
       setTimeout(() => textRef.current?.focus(), 50);
     }
   }, [open]);
@@ -32,8 +37,38 @@ export default function QueuedPromptDialog({ open, onClose, onSave, editBody, ed
 
   const handleSubmit = () => {
     if (!canSave) return;
-    onSave(body.trim(), sendAuto);
+    onSave(body.trim(), sendAuto, imagePaths.length > 0 ? imagePaths : undefined);
     onClose();
+  };
+
+  const handlePaste = async (e: React.ClipboardEvent<HTMLTextAreaElement>) => {
+    const items = Array.from(e.clipboardData.items).filter((it) => it.kind === "file" && it.type.startsWith("image/"));
+    if (items.length === 0) return;
+    e.preventDefault();
+    const ta = e.currentTarget;
+    const selStart = ta.selectionStart;
+    const selEnd = ta.selectionEnd;
+    const newPaths: string[] = [];
+    for (const item of items) {
+      const file = item.getAsFile();
+      if (!file) continue;
+      const buf = new Uint8Array(await file.arrayBuffer());
+      try {
+        newPaths.push(await saveClipboardImage(buf));
+      } catch (err) {
+        useBoardStore.setState({ error: String(err) });
+        return;
+      }
+    }
+    const baseCount = imagePaths.length;
+    const markers = newPaths.map((_, i) => imageMarker(baseCount + i + 1)).join(" ");
+    setBody(body.slice(0, selStart) + markers + body.slice(selEnd));
+    setImagePaths([...imagePaths, ...newPaths]);
+  };
+
+  const removeImageAt = (idx: number) => {
+    setImagePaths(imagePaths.filter((_, i) => i !== idx));
+    setBody(body.replace(imageMarker(idx + 1), ""));
   };
 
   return (
@@ -70,6 +105,7 @@ export default function QueuedPromptDialog({ open, onClose, onSave, editBody, ed
             ref={textRef}
             value={body}
             onChange={(e) => setBody(e.target.value)}
+            onPaste={handlePaste}
             placeholder="Enter your prompt..."
             className="w-full rounded-xl px-4 py-3 text-[13px] leading-[1.6] resize-none outline-none font-mono"
             style={{
@@ -82,6 +118,30 @@ export default function QueuedPromptDialog({ open, onClose, onSave, editBody, ed
             onFocus={(e) => { e.currentTarget.style.borderColor = "rgba(79,142,247,0.4)"; }}
             onBlur={(e) => { e.currentTarget.style.borderColor = c.border; }}
           />
+          {imagePaths.length > 0 && (
+            <div className="flex flex-wrap gap-1.5">
+              {imagePaths.map((p, idx) => (
+                <span
+                  key={p}
+                  className="inline-flex items-center gap-1.5 rounded px-2 py-1 text-[11px]"
+                  style={{ background: c.bgInput, color: c.textSecondary, border: `1px solid ${c.border}` }}
+                  title={p}
+                >
+                  Image #{idx + 1}
+                  <button
+                    type="button"
+                    onClick={() => removeImageAt(idx)}
+                    className="ml-0.5 hover:text-red-400 transition-colors"
+                    aria-label={`Remove image ${idx + 1}`}
+                  >
+                    <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
+                      <path strokeLinecap="round" strokeLinejoin="round" d="M6 18 18 6M6 6l12 12" />
+                    </svg>
+                  </button>
+                </span>
+              ))}
+            </div>
+          )}
 
           <label
             className="flex items-center gap-2.5 cursor-pointer select-none"

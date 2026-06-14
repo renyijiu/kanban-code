@@ -22,6 +22,7 @@ import {
 import { ASSISTANT_CLI, type Project, type AssistantId } from "../types";
 import { useTheme, t } from "../theme";
 import type { Turn, TranscriptPage, QueuedPrompt } from "../types";
+import { replaceMarkersWithMarkdown } from "../lib/promptImageLayout";
 import TerminalView from "./Terminal";
 import QueuedPromptDialog from "./QueuedPromptDialog";
 import QueuedPromptsBar from "./QueuedPromptsBar";
@@ -333,7 +334,15 @@ export default function CardDetailView() {
   // the dialog is skipped — launchFlags stays null and the dialog defaults
   // apply (no skip-perm, no env prefix). The same builder also feeds the
   // dialog's live preview so what the user sees is what runs.
-  const effectivePrompt = launchFlags?.prompt ?? promptBody ?? "";
+  //
+  // `[Image #N]` markers are rewritten to markdown image refs at this boundary
+  // — the editor surfaces (NewTaskDialog, LaunchConfirmationDialog) work in
+  // marker form so users can move attachments around, but Claude sees the
+  // resolved markdown paths. Matches macOS PromptImageLayout fallback.
+  const rawPrompt = launchFlags?.prompt ?? promptBody ?? "";
+  const effectivePrompt = card.link.promptImagePaths?.length
+    ? replaceMarkersWithMarkdown(rawPrompt, card.link.promptImagePaths)
+    : rawPrompt;
   const effectiveSkipPerm = launchFlags?.dangerouslySkipPermissions ?? false;
   const effectiveEnv = launchFlags?.envPrefix ?? [];
 
@@ -554,7 +563,10 @@ export default function CardDetailView() {
             .catch(() => {});
           return;
         }
-        terminalWriteRef.current(target.body + "\r");
+        const sendBody = target.imagePaths?.length
+          ? replaceMarkersWithMarkdown(target.body, target.imagePaths)
+          : target.body;
+        terminalWriteRef.current(sendBody + "\r");
         recentlyAutoSent.current.set(target.id, now);
         // Garbage-collect dedup entries older than 5 minutes.
         for (const [id, at] of recentlyAutoSent.current) {
@@ -615,16 +627,21 @@ export default function CardDetailView() {
   }, [card.id]);
 
   // Queued prompt handlers
-  const handleAddPrompt = async (body: string, sendAutomatically: boolean) => {
+  const handleAddPrompt = async (body: string, sendAutomatically: boolean, imagePaths?: string[]) => {
     try {
-      const prompt = await addQueuedPrompt(card.id, body, sendAutomatically);
+      const prompt = await addQueuedPrompt(card.id, body, sendAutomatically, imagePaths);
       setQueuedPrompts((prev) => [...prev, prompt]);
     } catch { /* silent */ }
   };
 
-  const handleUpdatePrompt = async (body: string, sendAutomatically: boolean) => {
+  const handleUpdatePrompt = async (body: string, sendAutomatically: boolean, imagePaths?: string[]) => {
     if (!editingPrompt) return;
     try {
+      // update_queued_prompt doesn't accept imagePaths yet — for edits we
+      // keep the existing attachment set. Image changes during edit are a
+      // follow-up; for now the chip-remove path is the editor's way to
+      // detach an image (the marker stays as literal text on send).
+      void imagePaths;
       await updateQueuedPrompt(card.id, editingPrompt.id, body, sendAutomatically);
       setQueuedPrompts((prev) =>
         prev.map((p) => p.id === editingPrompt.id ? { ...p, body, sendAutomatically } : p)
@@ -642,8 +659,12 @@ export default function CardDetailView() {
   const handleSendNow = async (promptId: string) => {
     const prompt = queuedPrompts.find((p) => p.id === promptId);
     if (!prompt || !terminalWriteRef.current) return;
-    // Write to terminal
-    terminalWriteRef.current(prompt.body + "\r");
+    // Write to terminal — substitute [Image #N] markers with markdown refs
+    // so Claude sees real paths, not the editor placeholders.
+    const sendBody = prompt.imagePaths?.length
+      ? replaceMarkersWithMarkdown(prompt.body, prompt.imagePaths)
+      : prompt.body;
+    terminalWriteRef.current(sendBody + "\r");
     // Remove from queue
     handleRemovePrompt(promptId);
   };
@@ -1075,6 +1096,7 @@ export default function CardDetailView() {
         onSave={editingPrompt ? handleUpdatePrompt : handleAddPrompt}
         editBody={editingPrompt?.body}
         editSendAuto={editingPrompt?.sendAutomatically}
+        editImagePaths={editingPrompt?.imagePaths}
       />
 
       {/* Launch confirmation dialog (fresh launches only) */}

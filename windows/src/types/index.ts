@@ -81,6 +81,9 @@ export interface QueuedPrompt {
   sendAutomatically: boolean;
   /** Set only for prompts the self-compact guard enqueued (mirrors macOS). */
   selfCompactThresholdTokens?: number;
+  /** Absolute paths to images attached to this prompt. Referenced from body
+   *  via `[Image #N]` markers (1-based). Mirrors macOS QueuedPrompt. */
+  imagePaths?: string[];
 }
 
 export interface Link {
@@ -95,6 +98,9 @@ export interface Link {
   manuallyArchived: boolean;
   source: "discovered" | "hook" | "github_issue" | "manual";
   promptBody?: string;
+  /** Absolute paths to images attached to the prompt body. Referenced via
+   *  `[Image #N]` markers (1-based). Mirrors macOS Link.promptImagePaths. */
+  promptImagePaths?: string[];
   sessionLink?: SessionLink;
   worktreeLink?: WorktreeLink;
   prLinks: PrLink[];

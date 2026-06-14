@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState } from "react";
-import { getSettings, useBoardStore } from "../store/boardStore";
+import { getSettings, saveClipboardImage, useBoardStore } from "../store/boardStore";
 import { useTheme, t } from "../theme";
 import { ASSISTANT_DISPLAY, type AssistantId } from "../types";
+import { imageMarker } from "../lib/promptImageLayout";
 
 export default function NewTaskDialog() {
   const { createCard, setNewTaskOpen, selectCard, cards } = useBoardStore();
@@ -14,7 +15,44 @@ export default function NewTaskDialog() {
   const [assistantId, setAssistantId] = useState<AssistantId>("claude");
   const [submitting, setSubmitting] = useState(false);
   const [settingsProjects, setSettingsProjects] = useState<string[]>([]);
+  const [imagePaths, setImagePaths] = useState<string[]>([]);
   const promptRef = useRef<HTMLTextAreaElement>(null);
+
+  const handlePromptPaste = async (e: React.ClipboardEvent<HTMLTextAreaElement>) => {
+    const items = Array.from(e.clipboardData.items).filter((it) => it.kind === "file" && it.type.startsWith("image/"));
+    if (items.length === 0) return;
+    e.preventDefault();
+    const textarea = e.currentTarget;
+    const selStart = textarea.selectionStart;
+    const selEnd = textarea.selectionEnd;
+    const newPaths: string[] = [];
+    for (const item of items) {
+      const file = item.getAsFile();
+      if (!file) continue;
+      const buf = new Uint8Array(await file.arrayBuffer());
+      try {
+        const path = await saveClipboardImage(buf);
+        newPaths.push(path);
+      } catch (err) {
+        useBoardStore.setState({ error: String(err) });
+        return;
+      }
+    }
+    const baseCount = imagePaths.length;
+    const markers = newPaths.map((_, i) => imageMarker(baseCount + i + 1)).join(" ");
+    const next = prompt.slice(0, selStart) + markers + prompt.slice(selEnd);
+    setPrompt(next);
+    setImagePaths([...imagePaths, ...newPaths]);
+  };
+
+  const removeImageAt = (idx: number) => {
+    setImagePaths(imagePaths.filter((_, i) => i !== idx));
+    // Strip the corresponding marker text. We don't reindex remaining markers
+    // — `replaceMarkersWithMarkdown` only honors markers <= imagePaths.length,
+    // so stale higher-index markers turn into literal text on send. Users can
+    // edit them out by hand, which matches macOS's behavior.
+    setPrompt(prompt.replace(imageMarker(idx + 1), ""));
+  };
 
   const cardProjects = [
     ...new Set(
@@ -47,7 +85,14 @@ export default function NewTaskDialog() {
     if (!prompt.trim()) return;
     setSubmitting(true);
     try {
-      const cardId = await createCard(prompt.trim(), title.trim() || null, project || ".", launch, assistantId);
+      const cardId = await createCard(
+        prompt.trim(),
+        title.trim() || null,
+        project || ".",
+        launch,
+        assistantId,
+        imagePaths.length > 0 ? imagePaths : undefined,
+      );
       setNewTaskOpen(false);
       if (launch && cardId) {
         selectCard(cardId);
@@ -105,9 +150,37 @@ export default function NewTaskDialog() {
               placeholder="Describe the task for Claude..."
               value={prompt}
               onChange={(e) => setPrompt(e.target.value)}
+              onPaste={handlePromptPaste}
               className="w-full rounded-lg px-3.5 py-3 text-[14px] outline-none resize-none transition-colors leading-relaxed"
               style={inputStyle}
             />
+            {imagePaths.length > 0 && (
+              <div className="flex flex-wrap gap-1.5 mt-2">
+                {imagePaths.map((p, idx) => (
+                  <span
+                    key={p}
+                    className="inline-flex items-center gap-1.5 rounded px-2 py-1 text-[11px]"
+                    style={{ background: c.bgInput, color: c.textSecondary, border: `1px solid ${c.border}` }}
+                    title={p}
+                  >
+                    <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                      <path strokeLinecap="round" strokeLinejoin="round" d="M2.25 15.75l5.159-5.159a2.25 2.25 0 013.182 0l5.159 5.159m-1.5-1.5l1.409-1.409a2.25 2.25 0 013.182 0l2.909 2.909m-18 3.75h16.5a1.5 1.5 0 001.5-1.5V6a1.5 1.5 0 00-1.5-1.5H3.75A1.5 1.5 0 002.25 6v12a1.5 1.5 0 001.5 1.5zm10.5-11.25h.008v.008h-.008V8.25zm.375 0a.375.375 0 11-.75 0 .375.375 0 01.75 0z" />
+                    </svg>
+                    Image #{idx + 1}
+                    <button
+                      type="button"
+                      onClick={() => removeImageAt(idx)}
+                      className="ml-0.5 hover:text-red-400 transition-colors"
+                      aria-label={`Remove image ${idx + 1}`}
+                    >
+                      <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
+                        <path strokeLinecap="round" strokeLinejoin="round" d="M6 18 18 6M6 6l12 12" />
+                      </svg>
+                    </button>
+                  </span>
+                ))}
+              </div>
+            )}
           </div>
 
           <div>
