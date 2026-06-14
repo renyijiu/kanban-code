@@ -16,6 +16,7 @@ mod git_remote;
 mod git_worktree;
 mod hook_event_store;
 mod hook_manager;
+mod images;
 mod jsonl_parser;
 mod ksuid;
 mod logging;
@@ -105,6 +106,7 @@ async fn create_card(
     project: String,
     launch: Option<bool>,
     assistant_id: Option<String>,
+    prompt_image_paths: Option<Vec<String>>,
     state: tauri::State<'_, AppState>,
 ) -> Result<coordination_store::Link, String> {
     let assistant = assistant_id
@@ -115,7 +117,13 @@ async fn create_card(
         .to_string();
     let link = state
         .coordination_store
-        .create_card(prompt.clone(), title, project.clone(), assistant)
+        .create_card(
+            prompt.clone(),
+            title,
+            project.clone(),
+            assistant,
+            prompt_image_paths,
+        )
         .await
         .map_err(|e| e.to_string())?;
 
@@ -124,6 +132,14 @@ async fn create_card(
     let _ = launch; // suppress unused warning
 
     Ok(link)
+}
+
+/// Save raw image bytes (e.g. from clipboard paste) to disk under
+/// `<data_dir>/images/`. Returns the absolute path the frontend should
+/// stash into Link.promptImagePaths / QueuedPrompt.imagePaths.
+#[tauri::command]
+async fn save_clipboard_image(bytes: Vec<u8>) -> Result<String, String> {
+    images::save_bytes(&bytes).await.map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -349,9 +365,10 @@ async fn add_queued_prompt(
     card_id: String,
     body: String,
     send_automatically: bool,
+    image_paths: Option<Vec<String>>,
     state: tauri::State<'_, AppState>,
 ) -> Result<coordination_store::QueuedPrompt, String> {
-    let prompt = coordination_store::QueuedPrompt::new(body, send_automatically);
+    let prompt = coordination_store::QueuedPrompt::new(body, send_automatically, image_paths);
     state
         .coordination_store
         .add_queued_prompt(&card_id, prompt)
@@ -365,11 +382,22 @@ async fn update_queued_prompt(
     prompt_id: String,
     body: String,
     send_automatically: bool,
+    image_paths: Option<Vec<String>>,
+    set_image_paths: Option<bool>,
     state: tauri::State<'_, AppState>,
 ) -> Result<(), String> {
+    // `set_image_paths` flips the outer wrapper: when false / absent we leave
+    // the stored attachments alone (legacy callers and pure body-edits).
+    // When true we replace with whatever `image_paths` carries — empty list
+    // and null both clear the attachments.
+    let paths_update = if set_image_paths.unwrap_or(false) {
+        Some(image_paths.filter(|v| !v.is_empty()))
+    } else {
+        None
+    };
     state
         .coordination_store
-        .update_queued_prompt(&card_id, &prompt_id, &body, send_automatically)
+        .update_queued_prompt(&card_id, &prompt_id, &body, send_automatically, paths_update)
         .await
         .map_err(|e| e.to_string())
 }
@@ -1778,6 +1806,7 @@ pub fn run() {
             update_queued_prompt,
             remove_queued_prompt,
             should_drop_self_compact_prompt,
+            save_clipboard_image,
             search_transcript,
             check_dependencies,
             resolve_github_base_url,

@@ -74,6 +74,11 @@ pub fn merge_into_target(source: &Link, target: &mut Link) {
     }
     if target.prompt_body.is_none() {
         target.prompt_body = source.prompt_body.clone();
+        // Image attachments travel with the prompt body — if we're inheriting
+        // text, inherit the markers' referenced files too.
+        if target.prompt_image_paths.is_none() {
+            target.prompt_image_paths = source.prompt_image_paths.clone();
+        }
     }
     if target.session_link.is_none() {
         target.session_link = source.session_link.clone();
@@ -154,6 +159,7 @@ mod tests {
             manually_archived: false,
             source: "manual".to_string(),
             prompt_body: None,
+            prompt_image_paths: None,
             session_link: None,
             worktree_link: None,
             pr_links: vec![],

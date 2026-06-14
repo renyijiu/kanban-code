@@ -19,6 +19,10 @@ pub struct QueuedPrompt {
     /// unrelated queue items. Mirrors macOS QueuedPrompt.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub self_compact_threshold_tokens: Option<i64>,
+    /// Absolute paths to images attached to this prompt. Referenced from the
+    /// body via `[Image #N]` markers (1-based). Mirrors macOS QueuedPrompt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image_paths: Option<Vec<String>>,
 }
 
 // ── Sub-structs ──────────────────────────────────────────────────────────────
@@ -113,6 +117,11 @@ pub struct Link {
     #[serde(default = "default_source")]
     pub source: String,
     pub prompt_body: Option<String>,
+    /// Images attached to `prompt_body` for unsent cards. Referenced from
+    /// the body via `[Image #N]` markers (1-based). Mirrors macOS
+    /// Link.promptImagePaths.
+    #[serde(default)]
+    pub prompt_image_paths: Option<Vec<String>>,
     pub session_link: Option<SessionLink>,
     pub worktree_link: Option<WorktreeLink>,
     #[serde(default)]
@@ -194,6 +203,7 @@ impl Link {
         title: Option<String>,
         project: String,
         assistant_id: String,
+        prompt_image_paths: Option<Vec<String>>,
     ) -> Self {
         let now = Utc::now();
         // KSUID matches the macOS format (chronologically sortable across the
@@ -212,6 +222,7 @@ impl Link {
             manually_archived: false,
             source: "manual".to_string(),
             prompt_body: Some(prompt),
+            prompt_image_paths,
             session_link: None,
             worktree_link: None,
             pr_links: vec![],
@@ -233,12 +244,17 @@ impl Link {
 }
 
 impl QueuedPrompt {
-    pub fn new(body: String, send_automatically: bool) -> Self {
+    pub fn new(
+        body: String,
+        send_automatically: bool,
+        image_paths: Option<Vec<String>>,
+    ) -> Self {
         Self {
             id: ksuid::generate(Some("prompt")),
             body,
             send_automatically,
             self_compact_threshold_tokens: None,
+            image_paths,
         }
     }
 }
@@ -363,8 +379,9 @@ impl CoordinationStore {
         title: Option<String>,
         project: String,
         assistant_id: String,
+        prompt_image_paths: Option<Vec<String>>,
     ) -> Result<Link> {
-        let link = Link::new_card(prompt, title, project, assistant_id);
+        let link = Link::new_card(prompt, title, project, assistant_id, prompt_image_paths);
         self.upsert_link(&link).await?;
         Ok(link)
     }
@@ -418,6 +435,7 @@ impl CoordinationStore {
         prompt_id: &str,
         body: &str,
         send_automatically: bool,
+        image_paths: Option<Option<Vec<String>>>,
     ) -> Result<()> {
         let mut links = self.read_links().await?;
         if let Some(link) = links.iter_mut().find(|l| l.id == card_id) {
@@ -425,6 +443,13 @@ impl CoordinationStore {
                 if let Some(p) = prompts.iter_mut().find(|p| p.id == prompt_id) {
                     p.body = body.to_string();
                     p.send_automatically = send_automatically;
+                    // Three states for image_paths:
+                    //   None         — caller didn't pass; keep what's there
+                    //   Some(None)   — caller wants to clear the attachments
+                    //   Some(Some(v))— caller wants to replace with `v`
+                    if let Some(new_paths) = image_paths {
+                        p.image_paths = new_paths;
+                    }
                 }
             }
             link.updated_at = Utc::now();
@@ -456,6 +481,7 @@ impl CoordinationStore {
             manually_archived: false,
             source: "github_issue".to_string(),
             prompt_body: Some(prompt_body.to_string()),
+            prompt_image_paths: None,
             session_link: None,
             worktree_link: None,
             pr_links: vec![],

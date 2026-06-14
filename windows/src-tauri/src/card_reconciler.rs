@@ -244,6 +244,7 @@ fn new_discovered_link(session: &Session) -> Link {
         manually_archived: false,
         source: "discovered".to_string(),
         prompt_body: session.first_prompt.clone(),
+        prompt_image_paths: None,
         session_link: Some(SessionLink {
             session_id: session.id.clone(),
             session_path: session.jsonl_path.clone(),
