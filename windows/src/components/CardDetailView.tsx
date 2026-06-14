@@ -73,6 +73,7 @@ export default function CardDetailView() {
 
   // Settings
   const [terminalFontSize, setTerminalFontSize] = useState(15);
+  const [sessionDetailFontSize, setSessionDetailFontSize] = useState(12);
   const [terminalShell, setTerminalShell] = useState<string>("cmd.exe");
   // Whether `tmux -V` succeeds in the user's WSL environment. When true AND
   // the chosen shell is a Unix shell, terminals are wrapped in
@@ -143,6 +144,7 @@ export default function CardDetailView() {
     getSettings()
       .then((s) => {
         setTerminalFontSize(s.terminalFontSize || 15);
+        setSessionDetailFontSize(s.sessionDetailFontSize || 12);
         setTerminalShell((s.terminalShell && s.terminalShell.trim()) || "cmd.exe");
         setAvailableProjects(s.projects ?? []);
       })
@@ -1020,6 +1022,7 @@ export default function CardDetailView() {
               turns={turns}
               transcriptPage={transcriptPage}
               loading={loadingTranscript}
+              fontSize={sessionDetailFontSize}
               onLoadMore={() => {
                 if (sessionId && transcriptPage?.hasMore)
                   loadTranscript(sessionId, transcriptPage.nextOffset, false);
@@ -1452,10 +1455,11 @@ function MetaBadge({ label, color, theme, title }: { label: string; color: strin
 
 /* ── History Tab with Search ────────────────────────────────────── */
 
-function HistoryTab({ turns, transcriptPage, loading, onLoadMore, searchText, searchMatches, currentMatchIdx, isSearching, onSearchChange, onNextMatch, onPrevMatch, onCheckpoint }: {
+function HistoryTab({ turns, transcriptPage, loading, fontSize, onLoadMore, searchText, searchMatches, currentMatchIdx, isSearching, onSearchChange, onNextMatch, onPrevMatch, onCheckpoint }: {
   turns: Turn[];
   transcriptPage: TranscriptPage | null;
   loading: boolean;
+  fontSize: number;
   onLoadMore: () => void;
   searchText: string;
   searchMatches: number[];
@@ -1470,6 +1474,7 @@ function HistoryTab({ turns, transcriptPage, loading, onLoadMore, searchText, se
   const c = t(theme);
   const currentMatchTurnIdx = searchMatches.length > 0 ? searchMatches[currentMatchIdx] : -1;
   const matchRef = useRef<HTMLDivElement>(null);
+  const scrollRef = useRef<HTMLDivElement>(null);
 
   // Scroll to current match
   useEffect(() => {
@@ -1477,6 +1482,16 @@ function HistoryTab({ turns, transcriptPage, loading, onLoadMore, searchText, se
       matchRef.current.scrollIntoView({ behavior: "smooth", block: "center" });
     }
   }, [currentMatchIdx, searchMatches]);
+
+  // Auto-load earlier turns when the scroll position is near the top, matching
+  // the macOS pattern. We throttle by checking `loading` so a slow backend
+  // doesn't fire a stampede of overlapping requests.
+  const onScroll = (e: React.UIEvent<HTMLDivElement>) => {
+    const el = e.currentTarget;
+    if (loading) return;
+    if (!transcriptPage?.hasMore) return;
+    if (el.scrollTop < 120) onLoadMore();
+  };
 
   return (
     <>
@@ -1563,9 +1578,25 @@ function HistoryTab({ turns, transcriptPage, loading, onLoadMore, searchText, se
         </div>
       ) : (
         <div
+          ref={scrollRef}
+          onScroll={onScroll}
           className="flex flex-col px-3 pt-2 pb-3 gap-0.5 font-mono overflow-y-auto flex-1"
-          style={{ background: "#141416" }}
+          style={{ background: "#141416", fontSize: `${fontSize}px` }}
         >
+          {/* Auto-load indicator when scrolled near top — replaces the macOS
+              ProgressView at top of the SessionHistoryView. */}
+          {transcriptPage?.hasMore && (
+            <div className="flex items-center justify-center py-2 text-[10px] font-mono" style={{ color: "#555" }}>
+              {loading ? (
+                <span className="flex items-center gap-2">
+                  <div className="w-3 h-3 border-2 border-[#4f8ef7] border-t-transparent rounded-full animate-spin" />
+                  Loading earlier turns…
+                </span>
+              ) : (
+                <span>{transcriptPage.totalTurns - turns.length} earlier turns — scroll up to load</span>
+              )}
+            </div>
+          )}
           {turns.map((turn) => {
             const isMatch = searchMatches.includes(turn.index);
             const isCurrent = turn.index === currentMatchTurnIdx;
@@ -1581,18 +1612,6 @@ function HistoryTab({ turns, transcriptPage, loading, onLoadMore, searchText, se
               </div>
             );
           })}
-          {transcriptPage?.hasMore && (
-            <button
-              onClick={onLoadMore}
-              disabled={loading}
-              className="mt-2 py-2 rounded-lg text-[11px] font-mono font-medium transition-all duration-150 disabled:opacity-40"
-              style={{ color: "#666", background: "rgba(255,255,255,0.03)" }}
-              onMouseEnter={(e) => { e.currentTarget.style.background = "rgba(255,255,255,0.06)"; }}
-              onMouseLeave={(e) => { e.currentTarget.style.background = "rgba(255,255,255,0.03)"; }}
-            >
-              {loading ? "Loading..." : `Load more (${transcriptPage.totalTurns - turns.length} remaining)`}
-            </button>
-          )}
         </div>
       )}
     </>
@@ -1660,10 +1679,12 @@ function TurnItem({ turn, searchQuery, isSearchMatch, isCurrentMatch, onCheckpoi
         ))
       ) : (
         <div className="flex gap-1.5 items-start">
-          <span className="text-[12px] leading-[1.6] shrink-0" style={{ color: isUser ? "#3fb950" : "#d4d4d4" }}>
+          {/* No hardcoded text-[Npx] \u2014 font size cascades from the History
+              scroll container so the Settings slider takes effect. */}
+          <span className="leading-[1.6] shrink-0" style={{ color: isUser ? "#3fb950" : "#d4d4d4" }}>
             {isUser ? "\u276F" : "\u25CF"}
           </span>
-          <span className="text-[12px] leading-[1.6] line-clamp-6" style={{ color: isUser ? "#e4e4e7" : "rgba(220,220,220,0.85)" }}>
+          <span className="leading-[1.6] line-clamp-6" style={{ color: isUser ? "#e4e4e7" : "rgba(220,220,220,0.85)" }}>
             <HighlightedText text={turn.textPreview || "(empty)"} query={searchQuery} />
           </span>
         </div>
@@ -1678,16 +1699,19 @@ function BlockLine({ block, isUser, isFirst, searchQuery }: {
   isFirst: boolean;
   searchQuery: string;
 }) {
+  // Every span below drops the hardcoded text-[12px] class so the History
+  // scroll container's inline fontSize cascades \u2014 that's what makes the
+  // Settings "Transcript font size" slider actually do something visible.
   if (block.kind === "text") {
     const trimmed = block.text.trim();
     if (!trimmed) return null;
     return (
       <div className="flex gap-1.5 items-start">
-        <span className="text-[12px] leading-[1.6] shrink-0" style={{ color: isUser ? "#3fb950" : "#d4d4d4" }}>
+        <span className="leading-[1.6] shrink-0" style={{ color: isUser ? "#3fb950" : "#d4d4d4" }}>
           {isFirst ? (isUser ? "\u276F" : "\u25CF") : "\u00A0\u00A0"}
         </span>
         <span
-          className="text-[12px] leading-[1.6]"
+          className="leading-[1.6]"
           style={{
             color: isUser ? "#e4e4e7" : "rgba(220,220,220,0.85)",
             display: "-webkit-box",
@@ -1707,8 +1731,8 @@ function BlockLine({ block, isUser, isFirst, searchQuery }: {
     const args = block.text.includes("(") ? block.text.slice(block.text.indexOf("(")) : "";
     return (
       <div className="flex gap-1.5 items-start">
-        <span className="text-[12px] leading-[1.6] shrink-0 text-[#3fb950]">{"\u00A0\u00A0\u25CF"}</span>
-        <span className="text-[12px] leading-[1.6]">
+        <span className="leading-[1.6] shrink-0 text-[#3fb950]">{"\u00A0\u00A0\u25CF"}</span>
+        <span className="leading-[1.6]">
           <span style={{ color: "rgba(63,185,80,0.8)" }}><HighlightedText text={name} query={searchQuery} /></span>
           {args && <span className="line-clamp-2" style={{ color: "#555" }}>{args}</span>}
         </span>
@@ -1719,8 +1743,8 @@ function BlockLine({ block, isUser, isFirst, searchQuery }: {
   if (block.kind === "tool_result") {
     return (
       <div className="flex gap-1.5 items-start">
-        <span className="text-[12px] leading-[1.6] shrink-0" style={{ color: "#444" }}>{"\u00A0\u00A0\u23BF"}</span>
-        <span className="text-[12px] leading-[1.6] line-clamp-3" style={{ color: "#444" }}>
+        <span className="leading-[1.6] shrink-0" style={{ color: "#444" }}>{"\u00A0\u00A0\u23BF"}</span>
+        <span className="leading-[1.6] line-clamp-3" style={{ color: "#444" }}>
           <HighlightedText text={block.text} query={searchQuery} />
         </span>
       </div>
@@ -1730,8 +1754,8 @@ function BlockLine({ block, isUser, isFirst, searchQuery }: {
   if (block.kind === "thinking") {
     return (
       <div className="flex gap-1.5 items-start">
-        <span className="text-[12px] leading-[1.6] shrink-0" style={{ color: "#444" }}>{"\u00A0\u00A0\u2234"}</span>
-        <span className="text-[12px] leading-[1.6] italic" style={{ color: "#444" }}>Thinking...</span>
+        <span className="leading-[1.6] shrink-0" style={{ color: "#444" }}>{"\u00A0\u00A0\u2234"}</span>
+        <span className="leading-[1.6] italic" style={{ color: "#444" }}>Thinking...</span>
       </div>
     );
   }
