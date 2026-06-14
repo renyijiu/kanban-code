@@ -120,12 +120,19 @@ pub fn list_claude_processes() -> Vec<ClaudeProcessInfo> {
 #[cfg(target_os = "windows")]
 fn windows_list_claude() -> Vec<ClaudeProcessInfo> {
     // PowerShell's CIM gives us PID + CommandLine in one shot and survives
-    // long arg strings WMIC truncates at 80 cols. The filter is loose on
-    // purpose — Claude installs land as `claude.exe`, `claude.cmd`, or
-    // `node.exe …\claude\cli.js`, and we want to surface them all.
+    // long arg strings WMIC truncates at 80 cols. The filter is intentionally
+    // narrow — claude installs land as `claude.exe`, `claude.cmd`, or
+    // `node.exe …\claude\cli.js`. We do NOT match every process whose
+    // CommandLine merely contains "claude" because that pulls in unrelated
+    // shells / editors / file managers whose argv references a `claude`
+    // username or repo name. The earlier loose filter would surface
+    // `notepad C:\Users\claude\todo.txt` and let the user kill it.
     let script = r#"
         Get-CimInstance Win32_Process |
-        Where-Object { $_.CommandLine -match 'claude' -or $_.Name -match '^claude' } |
+        Where-Object {
+            $_.Name -match '^claude(\.exe|\.cmd|\.bat)?$' -or
+            ($_.Name -match '^node(\.exe)?$' -and $_.CommandLine -match '[\\\/]claude[\\\/].*cli\.js')
+        } |
         ForEach-Object { "$($_.ProcessId)`t$($_.CommandLine)" }
     "#;
     let out = Command::new("powershell")
@@ -156,21 +163,25 @@ fn windows_list_claude() -> Vec<ClaudeProcessInfo> {
 
 #[cfg(not(target_os = "windows"))]
 fn unix_list_claude() -> Vec<ClaudeProcessInfo> {
-    let out = Command::new("ps")
-        .args(["-eo", "pid,command"])
-        .output();
+    let out = Command::new("ps").args(["-eo", "pid,command"]).output();
     let bytes = match out {
         Ok(o) if o.status.success() => o.stdout,
         _ => return vec![],
     };
     let text = String::from_utf8_lossy(&bytes);
     text.lines()
-        .filter(|l| l.contains("claude"))
         .filter_map(|line| {
             let trimmed = line.trim_start();
             let mut parts = trimmed.splitn(2, char::is_whitespace);
             let pid = parts.next()?.parse::<u32>().ok()?;
             let command = parts.next().unwrap_or("").trim().to_string();
+            // Narrow filter — the first argv token must be a Claude binary
+            // (or a node wrapper running the Claude CLI). Bare substring
+            // matching catches unrelated processes whose argv references a
+            // `claude` user / repo name.
+            if !is_claude_command_line(&command) {
+                return None;
+            }
             let session_id = extract_session_id(&command);
             Some(ClaudeProcessInfo {
                 pid,
@@ -181,14 +192,45 @@ fn unix_list_claude() -> Vec<ClaudeProcessInfo> {
         .collect()
 }
 
+#[cfg(not(target_os = "windows"))]
+fn is_claude_command_line(command: &str) -> bool {
+    let argv0 = command.split_whitespace().next().unwrap_or("");
+    // Mirror the Windows filter: claude{,.exe,.cmd} binary OR a node wrapper
+    // whose first script arg points into a claude package's cli.js.
+    let exe = std::path::Path::new(argv0)
+        .file_name()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_default();
+    let exe_matches = matches!(exe.as_str(), "claude" | "claude.exe" | "claude.cmd" | "claude.bat");
+    if exe_matches {
+        return true;
+    }
+    let is_node = exe == "node" || exe == "node.exe";
+    is_node && command.contains("/claude/") && command.contains("cli.js")
+}
+
 /// Pull a Claude session id out of `--session-id <id>` or `--resume <id>`.
 /// Matches the macOS heuristic so card→process linking lines up.
+///
+/// Only treats the flag as a match when the next char is `=`, whitespace, or
+/// end-of-string. Without that guard `--session-id-2 abc` would extract the
+/// substring after `--session-id` and produce `-2` as a session id, which
+/// would then never match a real card.
 fn extract_session_id(command: &str) -> Option<String> {
     for flag in ["--session-id", "--resume"] {
-        if let Some(idx) = command.find(flag) {
+        let mut search_from = 0;
+        while let Some(rel_idx) = command[search_from..].find(flag) {
+            let idx = search_from + rel_idx;
             let after = &command[idx + flag.len()..];
+            // Require a clean boundary so `--session-id-2` and similar
+            // longer flags don't match.
+            let next_char = after.chars().next();
+            let boundary_ok = matches!(next_char, None | Some('=') | Some(' ') | Some('\t'));
+            if !boundary_ok {
+                search_from = idx + flag.len();
+                continue;
+            }
             let trimmed = after.trim_start();
-            // Accept either `--flag id` or `--flag=id`.
             let candidate: &str = if let Some(eq) = trimmed.strip_prefix('=') {
                 eq
             } else {
@@ -201,6 +243,7 @@ fn extract_session_id(command: &str) -> Option<String> {
             if !token.is_empty() {
                 return Some(token);
             }
+            search_from = idx + flag.len();
         }
     }
     None
@@ -294,5 +337,51 @@ mod tests {
     #[test]
     fn returns_none_for_no_session_flag() {
         assert_eq!(extract_session_id("claude.exe --help"), None);
+    }
+
+    #[test]
+    fn does_not_match_session_id_with_extra_suffix() {
+        // `--session-id-2 abc` must NOT extract "abc" — there's no real flag
+        // named --session-id, the prefix match is incidental.
+        assert_eq!(
+            extract_session_id("claude.exe --session-id-2 abc"),
+            None
+        );
+    }
+
+    #[test]
+    fn finds_session_id_after_a_false_prefix_match() {
+        // Mix of a fake-prefixed flag and the real one. The earlier loose
+        // implementation would have stopped at the first `--session-id`
+        // substring with `-` after it; the new boundary check skips that
+        // and reads on to find the real flag.
+        assert_eq!(
+            extract_session_id("--session-id-foo bar --session-id real-id"),
+            Some("real-id".to_string())
+        );
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn claude_command_filter_matches_direct_binaries() {
+        assert!(is_claude_command_line("/usr/local/bin/claude --foo"));
+        assert!(is_claude_command_line("claude.exe --resume abc"));
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn claude_command_filter_matches_node_wrapper() {
+        assert!(is_claude_command_line(
+            "/usr/bin/node /opt/lib/claude/cli.js --foo"
+        ));
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn claude_command_filter_rejects_unrelated_processes() {
+        // The earlier bare-substring filter let these through.
+        assert!(!is_claude_command_line("notepad /home/claude/todo.txt"));
+        assert!(!is_claude_command_line("git log --grep \"fix claude\""));
+        assert!(!is_claude_command_line("/usr/bin/code C:\\Users\\claude"));
     }
 }
