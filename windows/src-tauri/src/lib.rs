@@ -10,7 +10,7 @@ mod chat_bootstrap;
 mod coding_assistant;
 mod context_usage;
 pub mod crash_handler;
-mod coordination_store;
+pub mod coordination_store;
 mod gh_cli;
 mod git_remote;
 mod git_worktree;
@@ -31,6 +31,7 @@ mod session_discovery;
 mod session_mover;
 mod settings_store;
 mod shell_command;
+mod statusline_installer;
 mod tmux;
 mod transcript_reader;
 
@@ -481,6 +482,23 @@ async fn update_queued_prompt(
 /// Returns false on every uncertainty (settings unreadable, prompt not
 /// found, no statusline JSON yet) — better to deliver a benign nudge
 /// than to silently swallow a real one.
+// ── Self-compact statusline + installer ──────────────────────────────────────
+
+#[tauri::command]
+async fn install_self_compact_statusline() -> Result<(), String> {
+    statusline_installer::install().await.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn uninstall_self_compact_statusline() -> Result<(), String> {
+    statusline_installer::uninstall().await.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn self_compact_statusline_installed() -> Result<bool, String> {
+    Ok(statusline_installer::is_installed().await)
+}
+
 #[tauri::command]
 async fn should_drop_self_compact_prompt(
     card_id: String,
@@ -1820,6 +1838,75 @@ async fn mutagen_flush() -> Result<(), String> {
     mutagen::flush_sync().await.map_err(|e| e.to_string())
 }
 
+/// Background poll loop — sibling to start_remote_polling/start_pr_polling.
+/// Every `settings.self_compact.poll_interval_seconds` (default 30):
+///   1. Walks links.json
+///   2. For each link with a live `sessionLink.sessionId`:
+///      a. Reads `<data_dir>/context/<sessionId>.json` (written by our
+///         `kanban statusline` per-turn).
+///      b. Finds the *highest* threshold rule the session has crossed
+///         (rules are sorted descending so the most-severe one wins).
+///      c. Enqueues a QueuedPrompt with sendAutomatically=true and the
+///         threshold stamped on it. The store dedupes so a session
+///         lingering above the threshold produces exactly one nudge.
+///
+/// When the feature toggle is off, the loop is a no-op poke that just
+/// re-reads the toggle. This keeps the task structure simple — no
+/// spawn/cancel ceremony when the user flips it from Settings.
+fn start_self_compact_polling(app: tauri::AppHandle) {
+    tauri::async_runtime::spawn(async move {
+        // Conservative floor — pinging the disk faster than once a second
+        // is wasteful and adds disk IO during heavy session activity.
+        const MIN_INTERVAL_SECS: u64 = 1;
+        loop {
+            let app_state = app.state::<AppState>();
+            let settings = match settings_store::SettingsStore::new(None).read().await {
+                Ok(s) => s,
+                Err(_) => {
+                    tokio::time::sleep(tokio::time::Duration::from_secs(30)).await;
+                    continue;
+                }
+            };
+            let sleep_secs = settings
+                .self_compact
+                .poll_interval_seconds
+                .max(MIN_INTERVAL_SECS);
+
+            if settings.self_compact.enabled {
+                let _ = run_self_compact_pass(&app_state, &settings).await;
+            }
+            tokio::time::sleep(tokio::time::Duration::from_secs(sleep_secs)).await;
+        }
+    });
+}
+
+async fn run_self_compact_pass(
+    app_state: &tauri::State<'_, AppState>,
+    settings: &settings_store::Settings,
+) -> Result<(), String> {
+    let links = app_state
+        .coordination_store
+        .read_links()
+        .await
+        .map_err(|e| e.to_string())?;
+    // Highest threshold first — that way the most-severe rule wins for a
+    // session that's crossed multiple at once.
+    let mut rules = settings.self_compact.rules.clone();
+    rules.sort_by_key(|r| std::cmp::Reverse(r.threshold_tokens));
+
+    for link in links.iter() {
+        let Some(session) = link.session_link.as_ref() else { continue };
+        let Some(usage) = context_usage::read(&session.session_id) else { continue };
+        let used = usage.current_context_tokens();
+        let Some(rule) = rules.iter().find(|r| used >= r.threshold_tokens) else { continue };
+        let _ = app_state
+            .coordination_store
+            .enqueue_self_compact_prompt(&link.id, rule.message.clone(), rule.threshold_tokens)
+            .await;
+    }
+    Ok(())
+}
+
 fn start_remote_polling(app: tauri::AppHandle) {
     tauri::async_runtime::spawn(async move {
         let watcher = remote_status::RemoteStatusWatcher::new();
@@ -1892,6 +1979,9 @@ pub fn run() {
             update_queued_prompt,
             remove_queued_prompt,
             should_drop_self_compact_prompt,
+            install_self_compact_statusline,
+            uninstall_self_compact_statusline,
+            self_compact_statusline_installed,
             save_clipboard_image,
             search_transcript,
             check_dependencies,
@@ -1972,6 +2062,7 @@ pub fn run() {
             start_issue_polling(app.handle().clone());
             start_hook_polling(app.handle().clone());
             start_remote_polling(app.handle().clone());
+            start_self_compact_polling(app.handle().clone());
 
             // Deploy the remote-shell wrapper at startup (idempotent).
             tauri::async_runtime::spawn(async {

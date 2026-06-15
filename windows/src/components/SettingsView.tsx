@@ -1,4 +1,5 @@
 import { useEffect, useState, type ReactNode } from "react";
+import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 import {
   discoverProjects,
@@ -318,6 +319,36 @@ function SelfCompactBlock({
     pollIntervalSeconds: 30,
     rules: [],
   };
+
+  // Statusline-install state. We probe on mount and after every
+  // install/uninstall click so the button label reflects what
+  // Claude Code's settings actually say.
+  const [statuslineInstalled, setStatuslineInstalled] = useState<boolean | null>(null);
+  const [statuslineBusy, setStatuslineBusy] = useState(false);
+
+  useEffect(() => {
+    invoke<boolean>("self_compact_statusline_installed")
+      .then(setStatuslineInstalled)
+      .catch(() => setStatuslineInstalled(null));
+  }, []);
+
+  const flipStatusline = async () => {
+    setStatuslineBusy(true);
+    try {
+      if (statuslineInstalled) {
+        await invoke("uninstall_self_compact_statusline");
+      } else {
+        await invoke("install_self_compact_statusline");
+      }
+      const next = await invoke<boolean>("self_compact_statusline_installed");
+      setStatuslineInstalled(next);
+    } catch (e) {
+      useBoardStore.setState({ error: String(e) });
+    } finally {
+      setStatuslineBusy(false);
+    }
+  };
+
   return (
     <div className="flex flex-col gap-3">
       <Toggle
@@ -329,9 +360,41 @@ function SelfCompactBlock({
           })
         }
         label="Auto self-compact guard"
-        description="Drop stale compact nudges from the queue once context usage drops below the threshold (compaction worked). Polling/generation is not yet wired on Windows; thresholds will be honored once it lands."
+        description="Polls each session's context usage and enqueues a nudge when it crosses a configured threshold. Stale nudges are dropped after the model compacts. Install the statusline below so Claude Code feeds it usage data."
         themeTokens={c}
       />
+      <div
+        className="rounded-lg px-3 py-2.5 text-[12px] flex items-center justify-between gap-3"
+        style={{ background: c.bgInput, border: `1px solid ${c.border}` }}
+      >
+        <div className="flex-1 min-w-0">
+          <div className="font-semibold" style={{ color: c.textSecondary }}>
+            Claude Code statusline
+          </div>
+          <div className="text-[11px] mt-0.5" style={{ color: c.textDim }}>
+            {statuslineInstalled === null
+              ? "Checking installation…"
+              : statuslineInstalled
+              ? "Installed in ~/.claude/settings.json. Each turn snapshots context usage for the poller."
+              : "Not installed. Without this, the guard has no data to act on."}
+          </div>
+        </div>
+        <button
+          onClick={flipStatusline}
+          disabled={statuslineBusy || statuslineInstalled === null}
+          className="px-3 py-1.5 rounded-lg text-[12px] font-medium transition-colors shrink-0 disabled:opacity-50"
+          style={{
+            color: statuslineInstalled ? "#f85149" : "#4f8ef7",
+            border: `1px solid ${statuslineInstalled ? "#f8514940" : "#4f8ef740"}`,
+          }}
+        >
+          {statuslineBusy
+            ? "…"
+            : statuslineInstalled
+            ? "Uninstall"
+            : "Install statusline"}
+        </button>
+      </div>
       {sc.enabled && sc.rules.length > 0 && (
         <div
           className="rounded-lg px-3 py-2 text-[12px]"

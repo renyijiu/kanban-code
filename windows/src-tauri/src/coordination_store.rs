@@ -561,6 +561,45 @@ impl CoordinationStore {
         self.write_links(&links).await
     }
 
+    /// Enqueues a self-compact nudge with dedup. Skips the write when the
+    /// card already has an identical-threshold queued prompt (or, for older
+    /// prompts that don't carry the threshold field, an identical body).
+    /// Returns whether the prompt was actually added.
+    ///
+    /// Mirrors macOS BackgroundOrchestrator's enqueue path: queueing is
+    /// idempotent across poll ticks so a single threshold crossing produces
+    /// exactly one nudge regardless of how long the session lingers above it.
+    pub async fn enqueue_self_compact_prompt(
+        &self,
+        card_id: &str,
+        body: String,
+        threshold_tokens: i64,
+    ) -> Result<bool> {
+        let mut links = self.read_links().await?;
+        let Some(link) = links.iter_mut().find(|l| l.id == card_id) else {
+            return Ok(false);
+        };
+        let body_trim = body.trim().to_string();
+        if let Some(prompts) = &link.queued_prompts {
+            for p in prompts {
+                if p.self_compact_threshold_tokens == Some(threshold_tokens) {
+                    return Ok(false);
+                }
+                if p.self_compact_threshold_tokens.is_none() && p.body.trim() == body_trim {
+                    return Ok(false);
+                }
+            }
+        }
+        let mut prompt = QueuedPrompt::new(body, true, None);
+        prompt.self_compact_threshold_tokens = Some(threshold_tokens);
+        link.queued_prompts
+            .get_or_insert_with(Vec::new)
+            .push(prompt);
+        link.updated_at = Utc::now();
+        self.write_links(&links).await?;
+        Ok(true)
+    }
+
     /// Pin or unpin a card. Pinning stamps `pinned_at = now` and assigns a
     /// pinned_sort_order one slot above the current first-pinned (so the
     /// new pin lands at the top, matching macOS). Unpinning clears both
@@ -628,21 +667,25 @@ mod tests {
             .join(format!("kanban-coord-{}", uuid::Uuid::new_v4().simple()))
     }
 
+    async fn mk_card(store: &CoordinationStore, title: Option<&str>) -> Link {
+        store
+            .create_card(
+                "prompt".into(),
+                title.map(str::to_string),
+                "C:/proj".into(),
+                "claude".into(),
+                None,
+                None,
+            )
+            .await
+            .unwrap()
+    }
+
     #[tokio::test]
     async fn mark_card_opened_stamps_last_opened_at_without_bumping_updated() {
         let base = tmp_base();
         let store = CoordinationStore::new(Some(base.clone()));
-        let created = store
-            .create_card(
-                "prompt".into(),
-                Some("title".into()),
-                "C:/proj".into(),
-                "claude".into(),
-                None,
-            )
-            .await
-            .unwrap();
-        // Snapshot updated_at before marking opened.
+        let created = mk_card(&store, Some("title")).await;
         let before_updated = created.updated_at;
         assert!(created.last_opened_at.is_none());
 
@@ -665,9 +708,78 @@ mod tests {
     async fn mark_card_opened_unknown_id_is_noop() {
         let base = tmp_base();
         let store = CoordinationStore::new(Some(base.clone()));
-        // No cards exist yet; mark_card_opened on a bogus id should not error.
         store.mark_card_opened("card_does_not_exist").await.unwrap();
         assert!(store.read_links().await.unwrap().is_empty());
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[tokio::test]
+    async fn enqueue_self_compact_prompt_dedupes_by_threshold() {
+        let base = tmp_base();
+        let store = CoordinationStore::new(Some(base.clone()));
+        let card = mk_card(&store, None).await;
+
+        let added1 = store
+            .enqueue_self_compact_prompt(&card.id, "compact pls".into(), 500_000)
+            .await
+            .unwrap();
+        let added2 = store
+            .enqueue_self_compact_prompt(&card.id, "compact pls — variant".into(), 500_000)
+            .await
+            .unwrap();
+        assert!(added1, "first enqueue should add");
+        assert!(!added2, "same-threshold re-enqueue should dedup");
+
+        let after = store.read_links().await.unwrap();
+        let link = after.iter().find(|l| l.id == card.id).unwrap();
+        let queue = link.queued_prompts.as_ref().expect("queue should be set");
+        assert_eq!(queue.len(), 1);
+        assert_eq!(queue[0].self_compact_threshold_tokens, Some(500_000));
+        assert!(queue[0].send_automatically);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[tokio::test]
+    async fn enqueue_self_compact_prompt_allows_higher_threshold() {
+        let base = tmp_base();
+        let store = CoordinationStore::new(Some(base.clone()));
+        let card = mk_card(&store, None).await;
+
+        store
+            .enqueue_self_compact_prompt(&card.id, "warn-500k".into(), 500_000)
+            .await
+            .unwrap();
+        let added2 = store
+            .enqueue_self_compact_prompt(&card.id, "warn-600k".into(), 600_000)
+            .await
+            .unwrap();
+        assert!(added2, "a higher-threshold rule must enqueue alongside the lower one");
+
+        let after = store.read_links().await.unwrap();
+        let link = after.iter().find(|l| l.id == card.id).unwrap();
+        let queue = link.queued_prompts.as_ref().unwrap();
+        assert_eq!(queue.len(), 2);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[tokio::test]
+    async fn enqueue_self_compact_prompt_dedupes_legacy_prompts_by_body() {
+        let base = tmp_base();
+        let store = CoordinationStore::new(Some(base.clone()));
+        let card = mk_card(&store, None).await;
+
+        let mut links = store.read_links().await.unwrap();
+        let link = links.iter_mut().find(|l| l.id == card.id).unwrap();
+        let mut p = QueuedPrompt::new("/compact".into(), true, None);
+        p.self_compact_threshold_tokens = None;
+        link.queued_prompts = Some(vec![p]);
+        store.write_links(&links).await.unwrap();
+
+        let added = store
+            .enqueue_self_compact_prompt(&card.id, "/compact".into(), 750_000)
+            .await
+            .unwrap();
+        assert!(!added, "legacy body-only match must still dedup");
         let _ = std::fs::remove_dir_all(&base);
     }
 }
