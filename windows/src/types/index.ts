@@ -119,6 +119,9 @@ export interface Link {
   /** Coding assistant that owns this card. Drives which CLI runs in the
    *  terminal. Defaults to "claude" for legacy/macOS-written cards. */
   assistantId?: AssistantId;
+  /** ISO timestamp of the last drawer open. Stamped by `mark_card_opened`
+   *  on selectCard. Mirrors macOS Link.lastOpenedAt. */
+  lastOpenedAt?: string;
 }
 
 export type AssistantId = "claude" | "gemini";

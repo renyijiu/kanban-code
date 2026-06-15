@@ -152,6 +152,10 @@ pub struct Link {
     /// `assistantId`) keep working.
     #[serde(default = "default_assistant")]
     pub assistant_id: String,
+    /// Last time the user opened this card's drawer. Stamped by
+    /// `mark_card_opened` on selectCard. Mirrors macOS Link.lastOpenedAt.
+    #[serde(default)]
+    pub last_opened_at: Option<DateTime<Utc>>,
 }
 
 fn default_assistant() -> String {
@@ -235,6 +239,7 @@ impl Link {
             pinned_at: None,
             pinned_sort_order: None,
             assistant_id,
+            last_opened_at: None,
         }
     }
 
@@ -499,6 +504,7 @@ impl CoordinationStore {
             pinned_at: None,
             pinned_sort_order: None,
             assistant_id: default_assistant(),
+            last_opened_at: None,
         };
         self.upsert_link(&link).await?;
         Ok(link)
@@ -561,6 +567,17 @@ impl CoordinationStore {
         self.write_links(&links).await
     }
 
+    /// Stamp `last_opened_at = now` on the named card. Mirrors macOS
+    /// `selectCard` side effect. Intentionally does NOT bump `updated_at` so
+    /// merely opening a card doesn't push it to the top of time-based sorts.
+    pub async fn mark_card_opened(&self, card_id: &str) -> Result<()> {
+        let mut links = self.read_links().await?;
+        if let Some(link) = links.iter_mut().find(|l| l.id == card_id) {
+            link.last_opened_at = Some(Utc::now());
+        }
+        self.write_links(&links).await
+    }
+
     /// Persist a manual ordering of pinned cards by assigning each its index
     /// in `ordered_ids` as `pinned_sort_order`. Like reorder_cards, this does
     /// NOT bump `updated_at` so the sort doesn't ripple into time-based
@@ -575,5 +592,58 @@ impl CoordinationStore {
             }
         }
         self.write_links(&links).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tmp_base() -> PathBuf {
+        std::env::temp_dir()
+            .join(format!("kanban-coord-{}", uuid::Uuid::new_v4().simple()))
+    }
+
+    #[tokio::test]
+    async fn mark_card_opened_stamps_last_opened_at_without_bumping_updated() {
+        let base = tmp_base();
+        let store = CoordinationStore::new(Some(base.clone()));
+        let created = store
+            .create_card(
+                "prompt".into(),
+                Some("title".into()),
+                "C:/proj".into(),
+                "claude".into(),
+                None,
+            )
+            .await
+            .unwrap();
+        // Snapshot updated_at before marking opened.
+        let before_updated = created.updated_at;
+        assert!(created.last_opened_at.is_none());
+
+        store.mark_card_opened(&created.id).await.unwrap();
+
+        let after = store.read_links().await.unwrap();
+        let link = after.iter().find(|l| l.id == created.id).unwrap();
+        assert!(
+            link.last_opened_at.is_some(),
+            "mark_card_opened should stamp last_opened_at"
+        );
+        assert_eq!(
+            link.updated_at, before_updated,
+            "mark_card_opened must not bump updated_at — sorting by activity would jitter on plain opens"
+        );
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[tokio::test]
+    async fn mark_card_opened_unknown_id_is_noop() {
+        let base = tmp_base();
+        let store = CoordinationStore::new(Some(base.clone()));
+        // No cards exist yet; mark_card_opened on a bogus id should not error.
+        store.mark_card_opened("card_does_not_exist").await.unwrap();
+        assert!(store.read_links().await.unwrap().is_empty());
+        let _ = std::fs::remove_dir_all(&base);
     }
 }

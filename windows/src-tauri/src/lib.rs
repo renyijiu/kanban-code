@@ -101,6 +101,18 @@ async fn reorder_cards(
 }
 
 #[tauri::command]
+async fn mark_card_opened(
+    card_id: String,
+    state: tauri::State<'_, AppState>,
+) -> Result<(), String> {
+    state
+        .coordination_store
+        .mark_card_opened(&card_id)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 async fn create_card(
     prompt: String,
     title: Option<String>,
@@ -958,6 +970,18 @@ async fn rename_channel(
     state: tauri::State<'_, AppState>,
 ) -> Result<bool, String> {
     state.channels_store.rename_channel(&old, &new).await.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn reorder_channels(
+    ordered_names: Vec<String>,
+    state: tauri::State<'_, AppState>,
+) -> Result<(), String> {
+    state
+        .channels_store
+        .reorder_channels(&ordered_names)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -1833,6 +1857,7 @@ pub fn run() {
             get_board_state,
             move_card,
             reorder_cards,
+            mark_card_opened,
             set_card_pinned,
             reorder_pinned_cards,
             create_card,
@@ -1887,6 +1912,7 @@ pub fn run() {
             create_channel,
             delete_channel,
             rename_channel,
+            reorder_channels,
             join_channel,
             leave_channel,
             send_channel_message,

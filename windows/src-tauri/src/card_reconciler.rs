@@ -271,5 +271,6 @@ fn new_discovered_link(session: &Session) -> Link {
         pinned_at: None,
         pinned_sort_order: None,
         assistant_id: "claude".to_string(),
+        last_opened_at: None,
     }
 }

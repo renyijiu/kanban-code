@@ -105,7 +105,17 @@ export const useBoardStore = create<BoardStore>((set, get) => ({
     }
   },
 
-  selectCard: (id) => set({ selectedCardId: id }),
+  selectCard: (id) => {
+    set({ selectedCardId: id });
+    // Fire-and-forget stamp so opening a card touches `lastOpenedAt`. No
+    // refresh — the field surfaces naturally on the next board refresh and
+    // shouldn't trigger a re-render just for the click stamp.
+    if (id) {
+      invoke("mark_card_opened", { cardId: id }).catch(() => {
+        // best-effort; the stamp is non-critical
+      });
+    }
+  },
 
   moveCard: async (cardId, column) => {
     // Optimistic update

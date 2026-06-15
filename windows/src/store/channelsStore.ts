@@ -227,6 +227,7 @@ interface ChannelsStore {
   reactDm: (pairKey: string, targetId: string, emoji: string) => Promise<void>;
   createChannel: (name: string) => Promise<Channel | null>;
   deleteChannel: (name: string) => Promise<void>;
+  reorderChannels: (orderedNames: string[]) => void;
   openDmTo: (target: string) => Promise<string | null>;
   saveDraft: (name: string, body: string) => Promise<void>;
   saveDmDraft: (pairKey: string, body: string) => Promise<void>;
@@ -567,6 +568,26 @@ export const useChannelsStore = create<ChannelsStore>((set, get) => ({
     } catch (e) {
       set({ error: String(e) });
     }
+  },
+
+  reorderChannels: (orderedNames) => {
+    // Optimistic — stamp the local order so the sidebar reflects the drag
+    // before the backend roundtrip completes.
+    set((state) => ({
+      channels: state.channels
+        .map((ch) => {
+          const idx = orderedNames.indexOf(ch.name);
+          return idx === -1 ? ch : { ...ch, sortOrder: idx };
+        })
+        .sort((a, b) => {
+          const so = (a.sortOrder ?? Number.MAX_SAFE_INTEGER) - (b.sortOrder ?? Number.MAX_SAFE_INTEGER);
+          if (so !== 0) return so;
+          return a.createdAt.localeCompare(b.createdAt);
+        }),
+    }));
+    invoke("reorder_channels", { orderedNames }).catch((e) =>
+      set({ error: String(e) })
+    );
   },
 
   openDmTo: async (target) => {
