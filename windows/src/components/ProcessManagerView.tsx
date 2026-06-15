@@ -92,6 +92,36 @@ export default function ProcessManagerView({ open, onClose }: Props) {
     }
   };
 
+  // "Managed" = sessions whose name matches some card's id. Mirrors macOS
+  // ProcessManagerView's "Kill All Managed (N)" button. Unmanaged tmux
+  // sessions (e.g. the user's own ad-hoc work) are left alone.
+  const managedTmuxSessions = state.tmuxSessions.filter((s) => cardForTmuxSession(s.name));
+
+  const killAllManagedTmux = async () => {
+    if (managedTmuxSessions.length === 0) return;
+    const ok = await ask(
+      `Kill ${managedTmuxSessions.length} managed tmux session${managedTmuxSessions.length === 1 ? "" : "s"}?\n\nThis ends every Claude session owned by a card. The action is irreversible.`,
+      {
+        title: "Kill All Managed",
+        kind: "warning",
+        okLabel: `Kill ${managedTmuxSessions.length}`,
+        cancelLabel: "Cancel",
+      }
+    );
+    if (!ok) return;
+    // Serial so a partial failure leaves the rest standing (and the error
+    // banner reflects which kill failed).
+    for (const s of managedTmuxSessions) {
+      try {
+        await invoke("tmux_kill_session", { name: s.name });
+      } catch (e) {
+        useBoardStore.setState({ error: String(e) });
+        break;
+      }
+    }
+    await refresh();
+  };
+
   const killClaude = async (pid: number) => {
     const ok = await ask(`Kill Claude process ${pid}?`, {
       title: "Kill process",
@@ -186,6 +216,18 @@ export default function ProcessManagerView({ open, onClose }: Props) {
             </button>
           ))}
           <span className="flex-1" />
+          {tab === "tmux" && managedTmuxSessions.length > 0 && (
+            <button
+              onClick={killAllManagedTmux}
+              className="px-3 py-1.5 rounded-lg text-[13px] transition-colors"
+              style={{ color: "#f85149", border: `1px solid #f8514940` }}
+              onMouseEnter={(e) => { e.currentTarget.style.background = "#f8514912"; }}
+              onMouseLeave={(e) => { e.currentTarget.style.background = "transparent"; }}
+              title="Kill every tmux session owned by a card"
+            >
+              Kill All Managed ({managedTmuxSessions.length})
+            </button>
+          )}
           <button
             onClick={refresh}
             disabled={loading}

@@ -4,6 +4,13 @@ import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { open as openPath } from "@tauri-apps/plugin-shell";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import {
+  DndContext, DragEndEvent, PointerSensor, useSensor, useSensors, closestCenter,
+} from "@dnd-kit/core";
+import {
+  arrayMove, SortableContext, useSortable, verticalListSortingStrategy,
+} from "@dnd-kit/sortable";
+import { CSS } from "@dnd-kit/utilities";
+import {
   otherPartyOfPair,
   partyDisplayName,
   useChannelsStore,
@@ -86,6 +93,7 @@ export default function Channels() {
     unreadCount,
     unreadDmCount,
     clearError,
+    reorderChannels,
   } = useChannelsStore();
   const { setChatOpen } = useBoardStore();
   const { theme } = useTheme();
@@ -163,16 +171,14 @@ export default function Channels() {
               No channels yet.
             </div>
           ) : (
-            channels.map((ch) => (
-              <ChannelRow
-                key={ch.id}
-                channel={ch}
-                selected={selectedChannel === ch.name}
-                unread={unreadCount(ch.name)}
-                onClick={() => selectChannel(ch.name)}
-                c={c}
-              />
-            ))
+            <SortableChannelList
+              channels={channels}
+              selectedChannel={selectedChannel}
+              unreadCount={unreadCount}
+              onSelect={selectChannel}
+              onReorder={reorderChannels}
+              c={c}
+            />
           )}
 
           <SidebarHeader
@@ -321,6 +327,52 @@ function SidebarHeader({
 
 // ── Sidebar rows ─────────────────────────────────────────────────────────────
 
+function SortableChannelList({
+  channels,
+  selectedChannel,
+  unreadCount,
+  onSelect,
+  onReorder,
+  c,
+}: {
+  channels: Channel[];
+  selectedChannel: string | null;
+  unreadCount: (name: string) => number;
+  onSelect: (name: string) => void;
+  onReorder: (orderedNames: string[]) => void;
+  c: ReturnType<typeof t>;
+}) {
+  // 5px distance prevents drag from intercepting plain clicks on rows.
+  const sensors = useSensors(
+    useSensor(PointerSensor, { activationConstraint: { distance: 5 } })
+  );
+  const handleDragEnd = (e: DragEndEvent) => {
+    const { active, over } = e;
+    if (!over || active.id === over.id) return;
+    const oldIdx = channels.findIndex((ch) => ch.name === active.id);
+    const newIdx = channels.findIndex((ch) => ch.name === over.id);
+    if (oldIdx === -1 || newIdx === -1) return;
+    const ordered = arrayMove(channels.map((ch) => ch.name), oldIdx, newIdx);
+    onReorder(ordered);
+  };
+  return (
+    <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={handleDragEnd}>
+      <SortableContext items={channels.map((ch) => ch.name)} strategy={verticalListSortingStrategy}>
+        {channels.map((ch) => (
+          <ChannelRow
+            key={ch.id}
+            channel={ch}
+            selected={selectedChannel === ch.name}
+            unread={unreadCount(ch.name)}
+            onClick={() => onSelect(ch.name)}
+            c={c}
+          />
+        ))}
+      </SortableContext>
+    </DndContext>
+  );
+}
+
 function ChannelRow({
   channel,
   selected,
@@ -334,21 +386,31 @@ function ChannelRow({
   onClick: () => void;
   c: ReturnType<typeof t>;
 }) {
+  const { attributes, listeners, setNodeRef, transform, transition, isDragging } =
+    useSortable({ id: channel.name });
+  const style: React.CSSProperties = {
+    transform: CSS.Transform.toString(transform),
+    transition,
+    background: selected ? c.bgCardSelected : "transparent",
+    color: selected ? c.textPrimary : unread > 0 ? c.textPrimary : c.textSecondary,
+    fontWeight: unread > 0 ? 600 : 400,
+    opacity: isDragging ? 0.5 : 1,
+    touchAction: "none",
+  };
   return (
     <button
+      ref={setNodeRef}
       onClick={onClick}
       className="w-full flex items-center justify-between px-4 py-1.5 text-[13px] transition-colors text-left"
-      style={{
-        background: selected ? c.bgCardSelected : "transparent",
-        color: selected ? c.textPrimary : unread > 0 ? c.textPrimary : c.textSecondary,
-        fontWeight: unread > 0 ? 600 : 400,
-      }}
+      style={style}
       onMouseEnter={(e) => {
         if (!selected) e.currentTarget.style.background = c.hoverBg;
       }}
       onMouseLeave={(e) => {
-        if (!selected) e.currentTarget.style.background = "transparent";
+        if (!selected) e.currentTarget.style.background = selected ? c.bgCardSelected : "transparent";
       }}
+      {...attributes}
+      {...listeners}
     >
       <span className="truncate"># {channel.name}</span>
       {unread > 0 && <UnreadBadge count={unread} />}

@@ -155,6 +155,23 @@ impl ChannelsStore {
 
     pub async fn list_channels(&self) -> Result<Vec<Channel>> { self.load_channels().await }
 
+    /// Persist a manual sidebar ordering by assigning each channel its index in
+    /// `ordered_names` as `sort_order`. Names that aren't present in the input
+    /// keep whatever `sort_order` they had. Mirrors `reorder_cards` semantics.
+    pub async fn reorder_channels(&self, ordered_names: &[String]) -> Result<()> {
+        let mut all = self.load_channels().await?;
+        let normalized: Vec<String> = ordered_names
+            .iter()
+            .map(|n| normalize_channel_name(n))
+            .collect();
+        for (idx, name) in normalized.iter().enumerate() {
+            if let Some(ch) = all.iter_mut().find(|c| &c.name == name) {
+                ch.sort_order = Some(idx as i32);
+            }
+        }
+        self.save_channels(&all).await
+    }
+
     pub async fn delete_channel(&self, name: &str) -> Result<bool> {
         let clean = normalize_channel_name(name);
         let mut all = self.load_channels().await?;
@@ -814,6 +831,47 @@ mod tests {
         let listed = store.list_channels().await.unwrap();
         assert_eq!(listed.len(), 1);
         assert_eq!(listed[0].name, "general");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[tokio::test]
+    async fn reorder_assigns_indices_and_persists() {
+        let base = tmp_base();
+        let store = ChannelsStore::new(Some(base.clone()));
+        store.create_channel("alpha", ChannelParticipant::user("user")).await.unwrap();
+        store.create_channel("bravo", ChannelParticipant::user("user")).await.unwrap();
+        store.create_channel("charlie", ChannelParticipant::user("user")).await.unwrap();
+        // Reverse the order. Pass with a leading # to verify normalization.
+        store
+            .reorder_channels(&[
+                "#charlie".into(),
+                "bravo".into(),
+                "alpha".into(),
+            ])
+            .await
+            .unwrap();
+        let listed = store.list_channels().await.unwrap();
+        let by_name: BTreeMap<_, _> = listed.iter().map(|c| (c.name.clone(), c.sort_order)).collect();
+        assert_eq!(by_name["charlie"], Some(0));
+        assert_eq!(by_name["bravo"], Some(1));
+        assert_eq!(by_name["alpha"], Some(2));
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[tokio::test]
+    async fn reorder_leaves_unmentioned_channels_alone() {
+        let base = tmp_base();
+        let store = ChannelsStore::new(Some(base.clone()));
+        store.create_channel("a", ChannelParticipant::user("user")).await.unwrap();
+        store.create_channel("b", ChannelParticipant::user("user")).await.unwrap();
+        store.create_channel("c", ChannelParticipant::user("user")).await.unwrap();
+        // Only reorder a and b; c was never given a sort_order so it stays None.
+        store.reorder_channels(&["b".into(), "a".into()]).await.unwrap();
+        let listed = store.list_channels().await.unwrap();
+        let by_name: BTreeMap<_, _> = listed.iter().map(|c| (c.name.clone(), c.sort_order)).collect();
+        assert_eq!(by_name["b"], Some(0));
+        assert_eq!(by_name["a"], Some(1));
+        assert_eq!(by_name["c"], None);
         let _ = std::fs::remove_dir_all(&base);
     }
 

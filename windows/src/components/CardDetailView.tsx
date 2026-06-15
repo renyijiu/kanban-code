@@ -1476,6 +1476,25 @@ function HistoryTab({ turns, transcriptPage, loading, fontSize, onLoadMore, sear
   const matchRef = useRef<HTMLDivElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
 
+  // macOS uses Cmd-held cursor as a power-user shortcut on top of the hover
+  // button. Windows mirrors with Ctrl. Both routes — the hover button and
+  // the Ctrl+click — work; this just adds the crosshair affordance.
+  const [ctrlHeld, setCtrlHeld] = useState(false);
+  useEffect(() => {
+    if (!onCheckpoint) return;
+    const down = (e: KeyboardEvent) => { if (e.key === "Control") setCtrlHeld(true); };
+    const up = (e: KeyboardEvent) => { if (e.key === "Control") setCtrlHeld(false); };
+    const blur = () => setCtrlHeld(false);
+    window.addEventListener("keydown", down);
+    window.addEventListener("keyup", up);
+    window.addEventListener("blur", blur);
+    return () => {
+      window.removeEventListener("keydown", down);
+      window.removeEventListener("keyup", up);
+      window.removeEventListener("blur", blur);
+    };
+  }, [onCheckpoint]);
+
   // Scroll to current match
   useEffect(() => {
     if (matchRef.current) {
@@ -1608,6 +1627,7 @@ function HistoryTab({ turns, transcriptPage, loading, fontSize, onLoadMore, sear
                   isSearchMatch={isMatch}
                   isCurrentMatch={isCurrent}
                   onCheckpoint={onCheckpoint}
+                  ctrlHeld={ctrlHeld}
                 />
               </div>
             );
@@ -1620,16 +1640,18 @@ function HistoryTab({ turns, transcriptPage, loading, fontSize, onLoadMore, sear
 
 /* ── Turn rendering with search highlighting ────────────────────── */
 
-function TurnItem({ turn, searchQuery, isSearchMatch, isCurrentMatch, onCheckpoint }: {
+function TurnItem({ turn, searchQuery, isSearchMatch, isCurrentMatch, onCheckpoint, ctrlHeld }: {
   turn: Turn;
   searchQuery: string;
   isSearchMatch: boolean;
   isCurrentMatch: boolean;
   onCheckpoint?: (turnIndex: number) => void | Promise<void>;
+  ctrlHeld?: boolean;
 }) {
   const isUser = turn.role === "user";
   const blocks = turn.contentBlocks;
   const [hovered, setHovered] = useState(false);
+  const ctrlClickArmed = !!onCheckpoint && !!ctrlHeld;
 
   let borderStyle: string | undefined;
   if (isCurrentMatch) borderStyle = "rgba(249,115,22,0.5)";
@@ -1647,6 +1669,7 @@ function TurnItem({ turn, searchQuery, isSearchMatch, isCurrentMatch, onCheckpoi
           ? "rgba(255,255,255,0.04)"
           : undefined,
         outline: borderStyle ? `1px solid ${borderStyle}` : undefined,
+        cursor: ctrlClickArmed ? "crosshair" : undefined,
       }}
       onMouseEnter={(e) => {
         setHovered(true);
@@ -1656,6 +1679,15 @@ function TurnItem({ turn, searchQuery, isSearchMatch, isCurrentMatch, onCheckpoi
         setHovered(false);
         if (!isCurrentMatch && !isSearchMatch) {
           e.currentTarget.style.background = isUser && blocks.some(b => b.kind === "text") ? "rgba(255,255,255,0.04)" : "";
+        }
+      }}
+      onClick={(e) => {
+        // Ctrl+click is the power-user route. The hover button still works
+        // independently — match macOS's "both routes valid" semantics.
+        if (ctrlClickArmed && (e.ctrlKey || ctrlHeld)) {
+          e.preventDefault();
+          e.stopPropagation();
+          onCheckpoint!(turn.index);
         }
       }}
     >

@@ -135,6 +135,14 @@ pub fn merge_into_target(source: &Link, target: &mut Link) {
     // updated_at — bump to now
     target.updated_at = Utc::now();
 
+    // last_opened_at — max-wins so the merged card inherits the more recent
+    // user attention; a stale source shouldn't push the target backwards.
+    match (target.last_opened_at, source.last_opened_at) {
+        (None, Some(s)) => target.last_opened_at = Some(s),
+        (Some(t), Some(s)) if s > t => target.last_opened_at = Some(s),
+        _ => {}
+    }
+
     // Deliberately left alone on the target side:
     //   id, column, created_at, manual_overrides, manually_archived,
     //   source, is_launching, queued_prompts, sort_order, assistant_id
@@ -172,6 +180,7 @@ mod tests {
             pinned_at: None,
             pinned_sort_order: None,
             assistant_id: "claude".to_string(),
+            last_opened_at: None,
         }
     }
 
