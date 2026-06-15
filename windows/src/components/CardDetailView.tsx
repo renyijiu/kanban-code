@@ -2053,6 +2053,11 @@ function ContentTab({
  * stable surface that all those steps drop into.
  */
 
+/// Max number of recently-closed tabs Ctrl+Shift+T can walk back through.
+/// Matches macOS BrowserView's ring buffer size; tabs older than this are
+/// dropped to keep the in-memory state bounded.
+const CLOSED_TAB_RING_SIZE = 10;
+
 function BrowserPanel({
   cardId,
   tabs,
@@ -2067,6 +2072,12 @@ function BrowserPanel({
   const [activeTabId, setActiveTabId] = useState<string | null>(tabs[0]?.id ?? null);
   const [newTabUrl, setNewTabUrl] = useState("");
   const [adding, setAdding] = useState(false);
+  // Newest-first ring buffer of tabs closed in this session. Kept in a ref
+  // so Ctrl+Shift+T re-reads the latest state without restarting effects
+  // every time a tab is closed. Cleared on app restart by design — matches
+  // macOS BrowserView (the ring is in-memory there too).
+  const closedRingRef = useRef<{ url: string; title?: string }[]>([]);
+  const urlInputRef = useRef<HTMLInputElement>(null);
 
   const sensors = useSensors(
     useSensor(PointerSensor, { activationConstraint: { distance: 5 } })
@@ -2085,30 +2096,111 @@ function BrowserPanel({
     }
   }, [tabs, activeTabId]);
 
-  const addTab = async () => {
-    const url = normalizeUrl(newTabUrl);
-    if (!url) return;
+  const addTab = async (urlOverride?: string, titleOverride?: string) => {
+    const raw = urlOverride ?? newTabUrl;
+    const url = normalizeUrl(raw);
+    if (!url) return null;
     setAdding(true);
     try {
       const created = await invoke<BrowserTabInfo | null>("add_browser_tab", { cardId, url });
-      setNewTabUrl("");
-      if (created) setActiveTabId(created.id);
+      if (urlOverride === undefined) setNewTabUrl("");
+      if (created) {
+        setActiveTabId(created.id);
+        // If we're restoring a closed tab, carry the old title forward so
+        // the chip label survives the round trip without waiting for a
+        // page-title fetch.
+        if (titleOverride && titleOverride !== created.title) {
+          await invoke("update_browser_tab", {
+            cardId,
+            tabId: created.id,
+            title: titleOverride,
+          }).catch(() => {});
+        }
+      }
       onChanged();
+      return created;
     } catch (e) {
       useBoardStore.setState({ error: String(e) });
+      return null;
     } finally {
       setAdding(false);
     }
   };
 
   const removeTab = async (tabId: string) => {
+    // Snapshot the tab's url + title before the round-trip so reopen-last-
+    // closed has something to restore. Pushing to the ring AFTER the
+    // backend succeeds would lose the snapshot on the failure path; doing
+    // it here is fine — the ring is purely in-memory affordance, no
+    // persistence to keep consistent.
+    const snapshot = tabs.find((t) => t.id === tabId);
     try {
       await invoke("remove_browser_tab", { cardId, tabId });
+      if (snapshot) {
+        const ring = closedRingRef.current;
+        ring.unshift({ url: snapshot.url, title: snapshot.title });
+        if (ring.length > CLOSED_TAB_RING_SIZE) ring.length = CLOSED_TAB_RING_SIZE;
+      }
       onChanged();
     } catch (e) {
       useBoardStore.setState({ error: String(e) });
     }
   };
+
+  const reopenLastClosed = async () => {
+    const last = closedRingRef.current.shift();
+    if (!last) return;
+    await addTab(last.url, last.title);
+  };
+
+  const focusUrlBar = () => {
+    urlInputRef.current?.focus();
+    urlInputRef.current?.select();
+  };
+
+  // Ctrl+T / Ctrl+W / Ctrl+Shift+T / Ctrl+L wired only while this panel is
+  // mounted (i.e. activeTab === "browser" in the parent). When the user is
+  // typing in the URL bar, only Ctrl+L is honored; Ctrl+W in a focused
+  // input means "delete word" in most apps, and Ctrl+T types a literal
+  // tab — both would be confusing if they instead manipulated tabs.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      const mod = e.ctrlKey || e.metaKey;
+      if (!mod) return;
+      const inEditable =
+        e.target instanceof HTMLInputElement ||
+        e.target instanceof HTMLTextAreaElement ||
+        (e.target instanceof HTMLElement && e.target.isContentEditable);
+
+      if (e.key === "l" || e.key === "L") {
+        // Ctrl+L always wins — works from inside the URL bar too (it just
+        // re-selects the contents, matching browser behaviour).
+        e.preventDefault();
+        focusUrlBar();
+        return;
+      }
+      if (inEditable) return;
+
+      if (e.key === "t" || e.key === "T") {
+        if (e.shiftKey) {
+          e.preventDefault();
+          reopenLastClosed();
+        } else {
+          e.preventDefault();
+          focusUrlBar();
+        }
+        return;
+      }
+      if ((e.key === "w" || e.key === "W") && activeTabId) {
+        e.preventDefault();
+        removeTab(activeTabId);
+        return;
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeTabId, tabs]);
 
   const handleDragEnd = async (event: DragEndEvent) => {
     const { active, over } = event;
@@ -2164,16 +2256,17 @@ function BrowserPanel({
         style={{ background: c.bgCard, borderBottom: `1px solid ${c.border}` }}
       >
         <input
+          ref={urlInputRef}
           type="text"
           value={newTabUrl}
           onChange={(e) => setNewTabUrl(e.target.value)}
           onKeyDown={(e) => { if (e.key === "Enter") addTab(); }}
-          placeholder="https://github.com/… (Enter to open in new tab)"
+          placeholder="https://github.com/… (Enter to open in new tab, Ctrl+L to focus)"
           className="flex-1 rounded px-2 py-1 text-[12px] font-mono outline-none"
           style={{ background: c.bgInput, border: `1px solid ${c.border}`, color: c.textPrimary }}
         />
         <button
-          onClick={addTab}
+          onClick={() => { addTab(); }}
           disabled={adding || !newTabUrl.trim()}
           className="px-2.5 py-1 rounded text-[12px] transition-colors disabled:opacity-40"
           style={{ color: c.textSecondary, border: `1px solid ${c.border}` }}
