@@ -2,7 +2,6 @@ import { forwardRef, useEffect, useState, useRef, useCallback, useMemo } from "r
 import { ask } from "@tauri-apps/plugin-dialog";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { open as openShell } from "@tauri-apps/plugin-shell";
 import {
   DndContext, type DragEndEvent, PointerSensor, useSensor, useSensors, closestCenter,
 } from "@dnd-kit/core";
@@ -2250,11 +2249,41 @@ function BrowserPanel({
         )}
       </div>
 
-      {/* URL bar + add new */}
+      {/* URL bar + nav controls + add new */}
       <div
-        className="flex items-center gap-2 px-3 py-2 shrink-0"
+        className="flex items-center gap-1.5 px-3 py-2 shrink-0"
         style={{ background: c.bgCard, borderBottom: `1px solid ${c.border}` }}
       >
+        <NavButton
+          label="←"
+          title="Back"
+          disabled={!activeTab}
+          onClick={() => {
+            if (!activeTab) return;
+            invoke("browser_webview_back", { cardId, tabId: activeTab.id }).catch(() => {});
+          }}
+          c={c}
+        />
+        <NavButton
+          label="→"
+          title="Forward"
+          disabled={!activeTab}
+          onClick={() => {
+            if (!activeTab) return;
+            invoke("browser_webview_forward", { cardId, tabId: activeTab.id }).catch(() => {});
+          }}
+          c={c}
+        />
+        <NavButton
+          label="⟳"
+          title="Reload"
+          disabled={!activeTab}
+          onClick={() => {
+            if (!activeTab) return;
+            invoke("browser_webview_reload", { cardId, tabId: activeTab.id }).catch(() => {});
+          }}
+          c={c}
+        />
         <input
           ref={urlInputRef}
           type="text"
@@ -2275,46 +2304,168 @@ function BrowserPanel({
         </button>
       </div>
 
-      {/* Tab body — placeholder until the WebView2 integration lands.
-          Step 3 of #125 will replace this with either Tauri's WebviewWindow
-          (Path A) or an embedded WebView2 control (Path B). */}
-      <div className="flex-1 overflow-y-auto p-4">
-        {activeTab ? (
-          <div
-            className="rounded-lg p-4 flex flex-col gap-3"
-            style={{ background: c.bgAccent("0.03"), border: `1px solid ${c.border}` }}
-          >
-            <div className="flex items-center gap-2">
-              <span className="text-[11px] uppercase tracking-wider" style={{ color: c.textDim }}>URL</span>
-              <a
-                href={activeTab.url}
-                onClick={(e) => {
-                  e.preventDefault();
-                  // System browser fallback until the embedded WebView lands.
-                  // Avoids a blank panel for users opening this tab today.
-                  openShell(activeTab.url).catch(() => {});
-                }}
-                className="font-mono text-[12px] underline-offset-2 hover:underline truncate"
-                style={{ color: c.textPrimary }}
-                title={activeTab.url}
-              >
-                {activeTab.url}
-              </a>
-            </div>
-            <div className="text-[12px]" style={{ color: c.textMuted }}>
-              The embedded WebView2 preview lands in step 3 of #125. Clicking
-              the URL above opens it in your system browser as a fallback so
-              the tab strip and persistence are usable today.
-            </div>
-          </div>
-        ) : (
-          <div className="text-[12px]" style={{ color: c.textMuted }}>
-            Type a URL above and press Enter (or Open) to add a tab. Tabs
-            persist on the card and survive restarts.
-          </div>
-        )}
-      </div>
+      {/* Tab body — the child WebView2 paints over this rect. The div is
+          here purely as a positional anchor for ResizeObserver; the
+          WebView2 itself lives outside React (managed by Tauri via
+          add_child) so React can't accidentally re-mount or re-key it. */}
+      {activeTab ? (
+        <BrowserTabBody cardId={cardId} tab={activeTab} c={c} />
+      ) : (
+        <div className="flex-1 overflow-y-auto p-4 text-[12px]" style={{ color: c.textMuted }}>
+          Type a URL above and press Enter (or Open) to add a tab. Tabs
+          persist on the card and survive restarts.
+        </div>
+      )}
     </div>
+  );
+}
+
+/// The anchor div the WebView2 child positions itself over. Reports its
+/// rect to Rust on mount, on URL change, and on every layout shift; tears
+/// the child down on unmount so swapping tabs doesn't leave stale views
+/// behind. The page chrome (URL bar, tab strip) is rendered OUTSIDE this
+/// component so the child webview never has to deal with z-order — Tauri
+/// has no z-index API for child webviews.
+function BrowserTabBody({
+  cardId,
+  tab,
+  c,
+}: {
+  cardId: string;
+  tab: BrowserTabInfo;
+  c: ReturnType<typeof t>;
+}) {
+  const anchorRef = useRef<HTMLDivElement>(null);
+  const lastRectRef = useRef<{ x: number; y: number; width: number; height: number } | null>(null);
+
+  // Measure the anchor's logical rect against the viewport. The Tauri
+  // `add_child` API works in logical pixels — getBoundingClientRect()
+  // returns CSS pixels, which match.
+  const measure = useCallback(() => {
+    const el = anchorRef.current;
+    if (!el) return null;
+    const r = el.getBoundingClientRect();
+    return { x: r.left, y: r.top, width: r.width, height: r.height };
+  }, []);
+
+  // Attach (or navigate) on tab change. We send the latest rect along so
+  // the first paint is in the right place — without it the child shows up
+  // at (0, 0) and snaps after the ResizeObserver fires.
+  useEffect(() => {
+    const rect = measure();
+    if (!rect) return;
+    lastRectRef.current = rect;
+    invoke("attach_browser_webview", {
+      cardId,
+      tabId: tab.id,
+      url: tab.url,
+      rect,
+    }).catch((e) => useBoardStore.setState({ error: String(e) }));
+    // Don't detach on cleanup here — tab switches happen often and tearing
+    // the webview down every switch defeats the cache. We detach only on
+    // BrowserPanel unmount via the dedicated effect below.
+  }, [cardId, tab.id, tab.url, measure]);
+
+  // Drive resizes from a ResizeObserver. A short debounce keeps the
+  // command count sane during a window drag without losing the final
+  // position — the trailing edge wins.
+  useEffect(() => {
+    const el = anchorRef.current;
+    if (!el) return;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const fire = (rect: { x: number; y: number; width: number; height: number }) => {
+      invoke("resize_browser_webview", {
+        cardId,
+        tabId: tab.id,
+        rect,
+      }).catch(() => {
+        // Resize errors are non-fatal — they typically mean the webview
+        // hasn't attached yet, which the next attach call fixes.
+      });
+    };
+    const observer = new ResizeObserver(() => {
+      const rect = measure();
+      if (!rect) return;
+      const last = lastRectRef.current;
+      if (
+        last &&
+        last.x === rect.x &&
+        last.y === rect.y &&
+        last.width === rect.width &&
+        last.height === rect.height
+      ) {
+        return;
+      }
+      lastRectRef.current = rect;
+      if (timer) clearTimeout(timer);
+      timer = setTimeout(() => fire(rect), 50);
+    });
+    observer.observe(el);
+    // Also listen for scroll on the parent — a card drawer scrolling
+    // doesn't fire ResizeObserver but it does shift the anchor's
+    // viewport-relative position.
+    const onScroll = () => {
+      const rect = measure();
+      if (!rect) return;
+      lastRectRef.current = rect;
+      fire(rect);
+    };
+    window.addEventListener("scroll", onScroll, true);
+    return () => {
+      if (timer) clearTimeout(timer);
+      observer.disconnect();
+      window.removeEventListener("scroll", onScroll, true);
+    };
+  }, [cardId, tab.id, measure]);
+
+  // Tear the child down when the BrowserTabBody unmounts — either because
+  // the user switched away from the Browser tab, or because the card
+  // drawer closed entirely. Tearing per-tab on unmount (rather than per-
+  // card on drawer close) keeps the logic local and matches how the
+  // panel itself thinks about lifecycle.
+  useEffect(() => {
+    const id = tab.id;
+    return () => {
+      invoke("detach_browser_webview", { cardId, tabId: id }).catch(() => {});
+    };
+  }, [cardId, tab.id]);
+
+  return (
+    <div
+      ref={anchorRef}
+      className="flex-1 relative"
+      style={{
+        // Neutral background visible only during the brief flash between
+        // attach and first paint. Real page content paints on top.
+        background: c.bgCard,
+      }}
+    />
+  );
+}
+
+function NavButton({
+  label,
+  title,
+  disabled,
+  onClick,
+  c,
+}: {
+  label: string;
+  title: string;
+  disabled?: boolean;
+  onClick: () => void;
+  c: ReturnType<typeof t>;
+}) {
+  return (
+    <button
+      onClick={onClick}
+      disabled={disabled}
+      title={title}
+      className="w-7 h-6 rounded text-[14px] leading-none transition-colors disabled:opacity-30 flex items-center justify-center"
+      style={{ color: c.textSecondary, border: `1px solid ${c.border}` }}
+    >
+      {label}
+    </button>
   );
 }
 

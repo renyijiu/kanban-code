@@ -2,6 +2,7 @@ mod activity_detector;
 mod assign_column;
 mod bm25;
 mod board_state;
+mod browser_webviews;
 mod card_reconciler;
 mod codex_sessions;
 mod gemini_sessions;
@@ -59,6 +60,7 @@ pub struct AppState {
     pub settings_store: Arc<SettingsStore>,
     pub session_discovery: Arc<SessionDiscovery>,
     pub channels_store: Arc<ChannelsStore>,
+    pub browser_webviews: Arc<browser_webviews::BrowserWebviewIndex>,
 }
 
 // ── Tauri Commands ───────────────────────────────────────────────────────────
@@ -336,6 +338,101 @@ async fn update_browser_tab(
         .update_browser_tab(&card_id, &tab_id, url, title)
         .await
         .map_err(|e| e.to_string())
+}
+
+// ── Per-tab WebView2 (#125 step 3 — Path A via add_child) ────────────────────
+
+/// Attach (or update) the child WebView2 for a tab. If a child already
+/// exists under this label, navigate it; otherwise spawn a fresh one.
+/// `rect` is the React panel's bounding box in logical pixels.
+#[tauri::command]
+async fn attach_browser_webview(
+    app: tauri::AppHandle,
+    card_id: String,
+    tab_id: String,
+    url: String,
+    rect: browser_webviews::BrowserRect,
+    state: tauri::State<'_, AppState>,
+) -> Result<String, String> {
+    browser_webviews::attach_or_update(
+        &app,
+        &state.browser_webviews,
+        &card_id,
+        &tab_id,
+        &url,
+        rect,
+    )
+    .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn resize_browser_webview(
+    app: tauri::AppHandle,
+    card_id: String,
+    tab_id: String,
+    rect: browser_webviews::BrowserRect,
+) -> Result<(), String> {
+    browser_webviews::resize(&app, &card_id, &tab_id, rect).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn detach_browser_webview(
+    app: tauri::AppHandle,
+    card_id: String,
+    tab_id: String,
+    state: tauri::State<'_, AppState>,
+) -> Result<(), String> {
+    browser_webviews::detach(&app, &state.browser_webviews, &card_id, &tab_id)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn detach_all_browser_webviews(
+    app: tauri::AppHandle,
+    card_id: String,
+    state: tauri::State<'_, AppState>,
+) -> Result<(), String> {
+    browser_webviews::detach_all(&app, &state.browser_webviews, &card_id)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn navigate_browser_webview(
+    app: tauri::AppHandle,
+    card_id: String,
+    tab_id: String,
+    url: String,
+    state: tauri::State<'_, AppState>,
+) -> Result<(), String> {
+    browser_webviews::navigate(&app, &state.browser_webviews, &card_id, &tab_id, &url)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn browser_webview_back(
+    app: tauri::AppHandle,
+    card_id: String,
+    tab_id: String,
+) -> Result<(), String> {
+    browser_webviews::navigate_back(&app, &card_id, &tab_id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn browser_webview_forward(
+    app: tauri::AppHandle,
+    card_id: String,
+    tab_id: String,
+) -> Result<(), String> {
+    browser_webviews::navigate_forward(&app, &card_id, &tab_id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn browser_webview_reload(
+    app: tauri::AppHandle,
+    card_id: String,
+    tab_id: String,
+) -> Result<(), String> {
+    browser_webviews::reload(&app, &card_id, &tab_id).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -2017,6 +2114,7 @@ pub fn run() {
             settings_store,
             session_discovery,
             channels_store,
+            browser_webviews: Arc::new(browser_webviews::BrowserWebviewIndex::new()),
         })
         .invoke_handler(tauri::generate_handler![
             get_board_state,
@@ -2026,6 +2124,14 @@ pub fn run() {
             set_card_pinned,
             reorder_pinned_cards,
             add_browser_tab,
+            attach_browser_webview,
+            resize_browser_webview,
+            detach_browser_webview,
+            detach_all_browser_webviews,
+            navigate_browser_webview,
+            browser_webview_back,
+            browser_webview_forward,
+            browser_webview_reload,
             remove_browser_tab,
             reorder_browser_tabs,
             update_browser_tab,

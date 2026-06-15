@@ -22,7 +22,11 @@ path = "src/bin/kanban.rs"
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = ["tray-icon", "image-png"] }
+# `unstable` enables Window::add_child / WebviewBuilder used by the embedded
+# browser tabs (#125). API is gated behind this feature flag in Tauri 2.10
+# but is the de facto path for multi-tab embedded browsing on Windows —
+# see PR #11616 and discussions #10079/#10264 in tauri-apps/tauri.
+tauri = { version = "2", features = ["tray-icon", "image-png", "unstable"] }
 tauri-plugin-notification = "2"
 tauri-plugin-shell = "2"
 serde = { version = "1", features = ["derive"] }
@@ -45,6 +49,12 @@ clap = { version = "4", features = ["derive"] }
 
 [profile.dev]
 incremental = true
+# `unstable` Tauri feature (for #125 add_child) brings the WebView2 multi-
+# webview surface in, which pushes the PDB past LNK1140's hard limit on
+# Windows. Line-tables-only debug info (debug = 1) keeps stack traces but
+# halves the PDB — the dev iteration loop is the same, breakpoints just
+# show without locals for non-current-crate code.
+debug = 1
 
 [profile.release]
 codegen-units = 1
