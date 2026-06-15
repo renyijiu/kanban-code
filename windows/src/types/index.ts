@@ -126,6 +126,18 @@ export interface Link {
    *  Settings.defaultAPIServiceIds[assistantId]. Mirrors macOS
    *  Link.apiServiceId. */
   apiServiceId?: string;
+  /** Persisted state for the card's embedded browser panel. Absent when
+   *  the user never opened a tab on this card. Mirrors macOS
+   *  Link.browserTabs. */
+  browserTabs?: BrowserTabInfo[];
+}
+
+/** Persisted state for one tab in the card's embedded browser panel.
+ *  Live WebView instances are managed separately on the UI side. */
+export interface BrowserTabInfo {
+  id: string;
+  url: string;
+  title?: string;
 }
 
 export type AssistantId = "claude" | "codex" | "gemini";
