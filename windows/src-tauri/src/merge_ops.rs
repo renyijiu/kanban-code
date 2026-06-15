@@ -145,7 +145,9 @@ pub fn merge_into_target(source: &Link, target: &mut Link) {
 
     // Deliberately left alone on the target side:
     //   id, column, created_at, manual_overrides, manually_archived,
-    //   source, is_launching, queued_prompts, sort_order, assistant_id
+    //   source, is_launching, queued_prompts, sort_order, assistant_id,
+    //   browser_tabs (per-card UX state; the source's tabs would just
+    //   duplicate or conflict, so the target keeps its own).
 }
 
 #[cfg(test)]
@@ -182,6 +184,7 @@ mod tests {
             assistant_id: "claude".to_string(),
             last_opened_at: None,
             api_service_id: None,
+            browser_tabs: None,
         }
     }
 

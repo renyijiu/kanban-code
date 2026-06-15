@@ -277,6 +277,67 @@ async fn reorder_pinned_cards(
         .map_err(|e| e.to_string())
 }
 
+// ── Browser tabs (#125) ──────────────────────────────────────────────────────
+
+#[tauri::command]
+async fn add_browser_tab(
+    card_id: String,
+    url: String,
+    state: tauri::State<'_, AppState>,
+) -> Result<Option<coordination_store::BrowserTabInfo>, String> {
+    state
+        .coordination_store
+        .add_browser_tab(&card_id, url)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn remove_browser_tab(
+    card_id: String,
+    tab_id: String,
+    state: tauri::State<'_, AppState>,
+) -> Result<bool, String> {
+    state
+        .coordination_store
+        .remove_browser_tab(&card_id, &tab_id)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn reorder_browser_tabs(
+    card_id: String,
+    ordered_ids: Vec<String>,
+    state: tauri::State<'_, AppState>,
+) -> Result<(), String> {
+    state
+        .coordination_store
+        .reorder_browser_tabs(&card_id, &ordered_ids)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Update a tab's URL and/or title. `title` follows a three-state pattern
+/// the existing queued-prompt update uses:
+///   omitted → keep existing
+///   null    → clear
+///   string  → replace
+#[tauri::command]
+async fn update_browser_tab(
+    card_id: String,
+    tab_id: String,
+    url: Option<String>,
+    #[allow(clippy::option_option)] title: Option<Option<String>>,
+    state: tauri::State<'_, AppState>,
+) -> Result<bool, String> {
+    state
+        .coordination_store
+        .update_browser_tab(&card_id, &tab_id, url, title)
+        .await
+        .map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 async fn get_transcript(
     session_id: String,
@@ -1964,6 +2025,10 @@ pub fn run() {
             mark_card_opened,
             set_card_pinned,
             reorder_pinned_cards,
+            add_browser_tab,
+            remove_browser_tab,
+            reorder_browser_tabs,
+            update_browser_tab,
             create_card,
             set_card_api_service,
             delete_card,

@@ -98,6 +98,29 @@ pub struct ManualOverrides {
     pub branch_watermark: Option<usize>,
 }
 
+/// Persisted state for one browser tab in a card's embedded browser panel.
+/// Mirrors macOS BrowserTabInfo exactly (id, url, optional title) so a
+/// `links.json` round-tripped between platforms keeps its tabs. The live
+/// WebView2/WKWebView instance lives outside this struct on each side.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct BrowserTabInfo {
+    pub id: String,
+    pub url: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+}
+
+impl BrowserTabInfo {
+    pub fn new(url: String) -> Self {
+        Self {
+            id: ksuid::generate(Some("browser")),
+            url,
+            title: None,
+        }
+    }
+}
+
 // ── Link (Card entity) ───────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -161,6 +184,11 @@ pub struct Link {
     /// to no service. Mirrors macOS Link.apiServiceId.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub api_service_id: Option<String>,
+    /// Persisted state for the card's embedded browser panel. `None` ==
+    /// "no browser yet" so absence keeps the JSON identical to legacy
+    /// files. Mirrors macOS Link.browserTabs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub browser_tabs: Option<Vec<BrowserTabInfo>>,
 }
 
 fn default_assistant() -> String {
@@ -246,6 +274,7 @@ impl Link {
             assistant_id,
             last_opened_at: None,
             api_service_id: None,
+            browser_tabs: None,
         }
     }
 
@@ -529,6 +558,7 @@ impl CoordinationStore {
             assistant_id: default_assistant(),
             last_opened_at: None,
             api_service_id: None,
+            browser_tabs: None,
         };
         self.upsert_link(&link).await?;
         Ok(link)
@@ -595,6 +625,91 @@ impl CoordinationStore {
         link.queued_prompts
             .get_or_insert_with(Vec::new)
             .push(prompt);
+        link.updated_at = Utc::now();
+        self.write_links(&links).await?;
+        Ok(true)
+    }
+
+    /// Append a new tab to the card's browser panel and return it. URL is
+    /// taken verbatim — input validation (scheme prefix, etc.) belongs to
+    /// the caller so we can stay schema-only here.
+    pub async fn add_browser_tab(&self, card_id: &str, url: String) -> Result<Option<BrowserTabInfo>> {
+        let mut links = self.read_links().await?;
+        let Some(link) = links.iter_mut().find(|l| l.id == card_id) else {
+            return Ok(None);
+        };
+        let tab = BrowserTabInfo::new(url);
+        let tabs = link.browser_tabs.get_or_insert_with(Vec::new);
+        tabs.push(tab.clone());
+        link.updated_at = Utc::now();
+        self.write_links(&links).await?;
+        Ok(Some(tab))
+    }
+
+    /// Remove the named tab from the card's browser panel. Returns whether
+    /// the tab existed. When the last tab is removed the Vec is cleared to
+    /// `None` so an empty browser panel matches the never-opened state on
+    /// disk (no `browserTabs` key emitted).
+    pub async fn remove_browser_tab(&self, card_id: &str, tab_id: &str) -> Result<bool> {
+        let mut links = self.read_links().await?;
+        let Some(link) = links.iter_mut().find(|l| l.id == card_id) else {
+            return Ok(false);
+        };
+        let Some(tabs) = link.browser_tabs.as_mut() else { return Ok(false) };
+        let before = tabs.len();
+        tabs.retain(|t| t.id != tab_id);
+        let removed = tabs.len() != before;
+        if removed {
+            if tabs.is_empty() {
+                link.browser_tabs = None;
+            }
+            link.updated_at = Utc::now();
+            self.write_links(&links).await?;
+        }
+        Ok(removed)
+    }
+
+    /// Replace the tab order to match `ordered_ids`. Tabs in `ordered_ids`
+    /// that aren't currently in the panel are ignored; tabs in the panel
+    /// that aren't in `ordered_ids` keep their relative order at the end.
+    /// Mirrors `reorder_cards` semantics — does NOT bump `updated_at`.
+    pub async fn reorder_browser_tabs(&self, card_id: &str, ordered_ids: &[String]) -> Result<()> {
+        let mut links = self.read_links().await?;
+        let Some(link) = links.iter_mut().find(|l| l.id == card_id) else { return Ok(()) };
+        let Some(tabs) = link.browser_tabs.as_mut() else { return Ok(()) };
+        let id_index: std::collections::HashMap<&String, usize> = ordered_ids
+            .iter()
+            .enumerate()
+            .map(|(idx, id)| (id, idx))
+            .collect();
+        tabs.sort_by_key(|t| id_index.get(&t.id).copied().unwrap_or(usize::MAX));
+        self.write_links(&links).await
+    }
+
+    /// Patch a tab's url and/or title. None on a field means "leave alone";
+    /// Some(value) replaces. The tab's `id` is the lookup key and is never
+    /// touched. Returns whether the tab existed.
+    pub async fn update_browser_tab(
+        &self,
+        card_id: &str,
+        tab_id: &str,
+        url: Option<String>,
+        title: Option<Option<String>>,
+    ) -> Result<bool> {
+        let mut links = self.read_links().await?;
+        let Some(link) = links.iter_mut().find(|l| l.id == card_id) else { return Ok(false) };
+        let Some(tabs) = link.browser_tabs.as_mut() else { return Ok(false) };
+        let Some(tab) = tabs.iter_mut().find(|t| t.id == tab_id) else { return Ok(false) };
+        if let Some(new_url) = url {
+            tab.url = new_url;
+        }
+        // Three states for title:
+        //   None         — keep existing
+        //   Some(None)   — clear back to no title
+        //   Some(Some(s))— replace
+        if let Some(new_title) = title {
+            tab.title = new_title;
+        }
         link.updated_at = Utc::now();
         self.write_links(&links).await?;
         Ok(true)
@@ -781,5 +896,192 @@ mod tests {
             .unwrap();
         assert!(!added, "legacy body-only match must still dedup");
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[tokio::test]
+    async fn add_browser_tab_appends_with_fresh_id() {
+        let base = tmp_base();
+        let store = CoordinationStore::new(Some(base.clone()));
+        let card = mk_card(&store, None).await;
+        let added = store
+            .add_browser_tab(&card.id, "https://example.com".into())
+            .await
+            .unwrap()
+            .expect("add returns the new tab");
+        assert_eq!(added.url, "https://example.com");
+        assert!(added.id.starts_with("browser_"), "id should be a ksuid with the browser prefix");
+
+        let after = store.read_links().await.unwrap();
+        let tabs = after[0].browser_tabs.as_ref().unwrap();
+        assert_eq!(tabs.len(), 1);
+        assert_eq!(tabs[0].id, added.id);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[tokio::test]
+    async fn add_browser_tab_unknown_card_is_noop() {
+        let base = tmp_base();
+        let store = CoordinationStore::new(Some(base.clone()));
+        let added = store
+            .add_browser_tab("does_not_exist", "https://example.com".into())
+            .await
+            .unwrap();
+        assert!(added.is_none());
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[tokio::test]
+    async fn remove_browser_tab_drops_then_clears_empty_vec_to_none() {
+        let base = tmp_base();
+        let store = CoordinationStore::new(Some(base.clone()));
+        let card = mk_card(&store, None).await;
+        let tab = store
+            .add_browser_tab(&card.id, "https://example.com".into())
+            .await
+            .unwrap()
+            .unwrap();
+        let removed = store.remove_browser_tab(&card.id, &tab.id).await.unwrap();
+        assert!(removed);
+        let after = store.read_links().await.unwrap();
+        assert!(
+            after[0].browser_tabs.is_none(),
+            "an empty browser_tabs Vec is collapsed to None so the serialized JSON drops the key"
+        );
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[tokio::test]
+    async fn remove_browser_tab_unknown_tab_returns_false() {
+        let base = tmp_base();
+        let store = CoordinationStore::new(Some(base.clone()));
+        let card = mk_card(&store, None).await;
+        store
+            .add_browser_tab(&card.id, "https://example.com".into())
+            .await
+            .unwrap();
+        let removed = store
+            .remove_browser_tab(&card.id, "browser_does_not_exist")
+            .await
+            .unwrap();
+        assert!(!removed);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[tokio::test]
+    async fn update_browser_tab_patches_only_provided_fields() {
+        let base = tmp_base();
+        let store = CoordinationStore::new(Some(base.clone()));
+        let card = mk_card(&store, None).await;
+        let tab = store
+            .add_browser_tab(&card.id, "https://original".into())
+            .await
+            .unwrap()
+            .unwrap();
+        // Patch title only — URL must survive.
+        store
+            .update_browser_tab(&card.id, &tab.id, None, Some(Some("My PR".into())))
+            .await
+            .unwrap();
+        let after = store.read_links().await.unwrap();
+        let stored = &after[0].browser_tabs.as_ref().unwrap()[0];
+        assert_eq!(stored.url, "https://original");
+        assert_eq!(stored.title.as_deref(), Some("My PR"));
+
+        // Patch URL only — title must survive.
+        store
+            .update_browser_tab(&card.id, &tab.id, Some("https://new".into()), None)
+            .await
+            .unwrap();
+        let after = store.read_links().await.unwrap();
+        let stored = &after[0].browser_tabs.as_ref().unwrap()[0];
+        assert_eq!(stored.url, "https://new");
+        assert_eq!(stored.title.as_deref(), Some("My PR"));
+
+        // Clear title back to None explicitly.
+        store
+            .update_browser_tab(&card.id, &tab.id, None, Some(None))
+            .await
+            .unwrap();
+        let after = store.read_links().await.unwrap();
+        let stored = &after[0].browser_tabs.as_ref().unwrap()[0];
+        assert!(stored.title.is_none());
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[tokio::test]
+    async fn reorder_browser_tabs_respects_input_order_and_appends_unmentioned() {
+        let base = tmp_base();
+        let store = CoordinationStore::new(Some(base.clone()));
+        let card = mk_card(&store, None).await;
+        let a = store.add_browser_tab(&card.id, "https://a".into()).await.unwrap().unwrap();
+        let b = store.add_browser_tab(&card.id, "https://b".into()).await.unwrap().unwrap();
+        let c = store.add_browser_tab(&card.id, "https://c".into()).await.unwrap().unwrap();
+        // Reorder to [c, a] — b not mentioned should end up last.
+        store
+            .reorder_browser_tabs(&card.id, &[c.id.clone(), a.id.clone()])
+            .await
+            .unwrap();
+        let after = store.read_links().await.unwrap();
+        let tabs = after[0].browser_tabs.as_ref().unwrap();
+        let urls: Vec<&str> = tabs.iter().map(|t| t.url.as_str()).collect();
+        assert_eq!(urls, vec!["https://c", "https://a", "https://b"]);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[tokio::test]
+    async fn browser_tab_field_round_trips_through_links_json() {
+        let base = tmp_base();
+        let store = CoordinationStore::new(Some(base.clone()));
+        let card = mk_card(&store, None).await;
+        let tab = store
+            .add_browser_tab(&card.id, "https://example.com".into())
+            .await
+            .unwrap()
+            .unwrap();
+        // Reopen the store from scratch and confirm the tab is still there.
+        let store2 = CoordinationStore::new(Some(base.clone()));
+        let after = store2.read_links().await.unwrap();
+        let tabs = after[0].browser_tabs.as_ref().unwrap();
+        assert_eq!(tabs.len(), 1);
+        assert_eq!(tabs[0].id, tab.id);
+        assert_eq!(tabs[0].url, "https://example.com");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn link_without_browser_tabs_doesnt_emit_key() {
+        // Defensive: a card that's never opened a browser shouldn't add a
+        // `browserTabs` key to the JSON; macOS readers expect absence.
+        let link = Link {
+            id: "x".into(),
+            name: None,
+            project_path: None,
+            column: "backlog".into(),
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+            last_activity: None,
+            manual_overrides: Default::default(),
+            manually_archived: false,
+            source: "manual".into(),
+            prompt_body: None,
+            prompt_image_paths: None,
+            session_link: None,
+            worktree_link: None,
+            pr_links: vec![],
+            issue_link: None,
+            discovered_branches: None,
+            is_remote: false,
+            is_launching: None,
+            queued_prompts: None,
+            sort_order: None,
+            pinned_at: None,
+            pinned_sort_order: None,
+            assistant_id: "claude".into(),
+            last_opened_at: None,
+            api_service_id: None,
+            browser_tabs: None,
+        };
+        let json = serde_json::to_string(&link).unwrap();
+        assert!(!json.contains("browserTabs"), "absent tab list must not write the key");
     }
 }
