@@ -227,6 +227,21 @@ impl SessionDiscovery {
             .filter(|s| s.message_count > 0)
             .collect();
 
+        // Composite step — fold in Gemini sessions from `~/.gemini/tmp/`.
+        // Gemini ids are independently generated and don't collide with the
+        // project-encoded ksuid ids Claude writes, but we dedup on id
+        // defensively so a coincidence doesn't surface the same session
+        // twice on the board.
+        let gemini = crate::gemini_sessions::discover().await;
+        let claude_ids: std::collections::HashSet<String> =
+            sessions.iter().map(|s| s.id.clone()).collect();
+        for s in gemini {
+            if claude_ids.contains(&s.id) {
+                continue;
+            }
+            sessions.push(s);
+        }
+
         sessions.sort_by(|a, b| b.modified_time.cmp(&a.modified_time));
         Ok(sessions)
     }
