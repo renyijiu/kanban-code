@@ -130,6 +130,10 @@ export interface Link {
    *  the user never opened a tab on this card. Mirrors macOS
    *  Link.browserTabs. */
   browserTabs?: BrowserTabInfo[];
+  /** Which shell this card's embedded terminal launches into. `null` /
+   *  undefined means the user hasn't picked yet — the gate panel asks
+   *  Windows or WSL before any terminal can launch. No global default. */
+  cardRuntime?: CardRuntime | null;
 }
 
 /** Persisted state for one tab in the card's embedded browser panel.
@@ -289,6 +293,12 @@ export interface APIService {
   baseURL?: string;
 }
 
+/** Which shell a card's embedded terminal launches into. Lives on
+ *  `Link.cardRuntime` — each card asks once via its gate panel; no global
+ *  default. Matches `CardRuntime` in `settings_store.rs` (serialized as the
+ *  lowercase variant name). */
+export type CardRuntime = "windows" | "wsl";
+
 export interface Settings {
   projects: Project[];
   globalView: GlobalViewSettings;
@@ -303,8 +313,6 @@ export interface Settings {
   /** Font size for the History tab transcript (8-20). Mirrors macOS
    *  `sessionDetailFontSize` AppStorage; defaults to 12. */
   sessionDetailFontSize?: number;
-  /** Shell command for the embedded terminal — space-separated tokens. Default "cmd.exe". */
-  terminalShell: string;
   remote?: RemoteSettings;
   /** Automatic context-limit guard for Claude sessions (mirrors macOS). */
   selfCompact?: SelfCompactSettings;

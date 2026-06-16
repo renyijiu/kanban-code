@@ -274,5 +274,6 @@ fn new_discovered_link(session: &Session) -> Link {
         last_opened_at: None,
         api_service_id: None,
         browser_tabs: None,
+        card_runtime: None,
     }
 }

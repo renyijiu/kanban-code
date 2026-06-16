@@ -167,6 +167,19 @@ async fn set_card_api_service(
         .map_err(|e| e.to_string())
 }
 
+#[tauri::command]
+async fn set_card_runtime(
+    card_id: String,
+    runtime: Option<settings_store::CardRuntime>,
+    state: tauri::State<'_, AppState>,
+) -> Result<(), String> {
+    state
+        .coordination_store
+        .set_card_runtime(&card_id, runtime)
+        .await
+        .map_err(|e| e.to_string())
+}
+
 /// Save raw image bytes (e.g. from clipboard paste) to disk under
 /// `<data_dir>/images/`. Returns the absolute path the frontend should
 /// stash into Link.promptImagePaths / QueuedPrompt.imagePaths.
@@ -1896,15 +1909,13 @@ fn build_tray(app: &tauri::App) -> tauri::Result<()> {
 fn start_hook_polling(app: tauri::AppHandle) {
     tauri::async_runtime::spawn(async move {
         // Install asynchronously so a slow WSL boot doesn't block startup.
-        let state = app.state::<AppState>();
-        match hook_manager::install_if_needed(&state.settings_store).await {
+        match hook_manager::install_if_needed().await {
             Ok(true) => {}
             Ok(false) => return, // intentionally skipped — no tail loop
             Err(e) => {
                 logging::warn("hooks", &format!("install failed: {} — tail loop will still run", e));
             }
         }
-        drop(state);
 
         let store = std::sync::Arc::new(hook_event_store::HookEventStore::new());
         store.touch();
@@ -2137,6 +2148,7 @@ pub fn run() {
             update_browser_tab,
             create_card,
             set_card_api_service,
+            set_card_runtime,
             delete_card,
             archive_card,
             rename_card,

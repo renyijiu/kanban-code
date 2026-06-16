@@ -5,6 +5,7 @@ use std::path::PathBuf;
 use tokio::fs;
 
 use crate::ksuid;
+use crate::settings_store::CardRuntime;
 
 // ── Queued Prompt ────────────────────────────────────────────────────────────
 
@@ -189,6 +190,12 @@ pub struct Link {
     /// files. Mirrors macOS Link.browserTabs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub browser_tabs: Option<Vec<BrowserTabInfo>>,
+    /// Which shell this card's embedded terminal launches into. `None` means
+    /// the user hasn't picked yet — the gate panel shows Windows/WSL buttons
+    /// and persists the choice here on click. No global default; each card
+    /// asks once.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub card_runtime: Option<CardRuntime>,
 }
 
 fn default_assistant() -> String {
@@ -275,6 +282,7 @@ impl Link {
             last_opened_at: None,
             api_service_id: None,
             browser_tabs: None,
+            card_runtime: None,
         }
     }
 
@@ -443,6 +451,19 @@ impl CoordinationStore {
         self.write_links(&links).await
     }
 
+    pub async fn set_card_runtime(
+        &self,
+        card_id: &str,
+        runtime: Option<CardRuntime>,
+    ) -> Result<()> {
+        let mut links = self.read_links().await?;
+        if let Some(link) = links.iter_mut().find(|l| l.id == card_id) {
+            link.card_runtime = runtime;
+            link.updated_at = Utc::now();
+        }
+        self.write_links(&links).await
+    }
+
     pub async fn remove_link(&self, card_id: &str) -> Result<()> {
         let mut links = self.read_links().await?;
         links.retain(|l| l.id != card_id);
@@ -559,6 +580,7 @@ impl CoordinationStore {
             last_opened_at: None,
             api_service_id: None,
             browser_tabs: None,
+            card_runtime: None,
         };
         self.upsert_link(&link).await?;
         Ok(link)
@@ -1080,8 +1102,10 @@ mod tests {
             last_opened_at: None,
             api_service_id: None,
             browser_tabs: None,
+            card_runtime: None,
         };
         let json = serde_json::to_string(&link).unwrap();
         assert!(!json.contains("browserTabs"), "absent tab list must not write the key");
+        assert!(!json.contains("cardRuntime"), "unpicked runtime must not write the key");
     }
 }

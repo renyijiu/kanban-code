@@ -8,10 +8,14 @@
 //! `/mnt/c/...` mount), so the Rust tail can read directly without UNC paths.
 //!
 //! Skip-conditions (idempotent):
-//!   * `terminalShell` doesn't include "wsl" → tracked TODO, no install.
 //!   * `wsl.exe -- bash -lc "true"` fails → WSL not set up, log + skip.
 //!   * `~/.kanban-code/hook.sh` already present AND `settings.json` already
 //!     references it → no-op (re-runs are safe).
+//!
+//! Card runtime is per-card now (`Link.card_runtime`), so we can't gate on a
+//! global setting. We install unconditionally when WSL is reachable: the
+//! script + settings.json edits are idempotent, and any future WSL card will
+//! get hook events without a second app launch.
 
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
@@ -19,7 +23,6 @@ use std::io::Write;
 
 use crate::coordination_store::kanban_data_dir;
 use crate::logging;
-use crate::settings_store::SettingsStore;
 use crate::tmux::windows_path_to_wsl;
 
 const HOOK_EVENTS: &[&str] = &[
@@ -31,19 +34,10 @@ const HOOK_EVENTS: &[&str] = &[
 ];
 
 /// Top-level entry: install (or refresh) the WSL-side hook script + settings.
-/// Reads the user's current `terminalShell` to decide whether to install at
-/// all. Returns `Ok(false)` when intentionally skipped (e.g. non-wsl shell).
-pub async fn install_if_needed(settings_store: &SettingsStore) -> Result<bool, String> {
-    let settings = settings_store.read().await.map_err(|e| e.to_string())?;
-    let shell = settings.terminal_shell.to_lowercase();
-    if !shell.contains("wsl") {
-        logging::info(
-            "hooks",
-            "skipping install — Settings.terminalShell is not wsl; native cmd.exe/pwsh hooks tracked as TODO",
-        );
-        return Ok(false);
-    }
-
+/// Idempotent — safe to call on every app launch. Skips silently when WSL
+/// isn't reachable (e.g. the user only has Windows cards). Returns
+/// `Ok(false)` when WSL is missing.
+pub async fn install_if_needed() -> Result<bool, String> {
     if !wsl_ok() {
         logging::warn(
             "hooks",

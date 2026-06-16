@@ -11,9 +11,9 @@
 //!   * multi-window per session (one window per drawer tab)
 //!
 //! Gating: the caller is responsible for checking
-//! `Settings.terminal_shell.contains("wsl")` before invoking these commands.
-//! When the user has chosen native `cmd.exe` / `pwsh.exe`, tmux is unavailable
-//! and the legacy one-shot PTY remains in effect (tracked TODO: PTY-pool).
+//! `Settings.card_runtime == Some(CardRuntime::Wsl)` before invoking these
+//! commands. When the user has chosen native Windows, tmux is unavailable and
+//! the legacy one-shot PTY remains in effect (tracked TODO: PTY-pool).
 //!
 //! All commands run synchronously — tmux operations are quick and serializing
 //! them avoids the lock-step ordering problems seen on macOS when paste and
