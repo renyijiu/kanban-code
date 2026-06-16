@@ -257,12 +257,6 @@ pub struct Settings {
     /// between platforms preserves the preference.
     #[serde(default = "default_session_detail_font_size")]
     pub session_detail_font_size: u32,
-    /// Shell command used by the embedded terminal — space-separated tokens.
-    /// Defaults to `cmd.exe` for a native Windows experience. Set to
-    /// `wsl.exe` (or `pwsh.exe -NoLogo`, etc.) to run Claude in a different
-    /// shell. The first token is the executable; remaining tokens are args.
-    #[serde(default = "default_terminal_shell")]
-    pub terminal_shell: String,
     #[serde(default)]
     pub remote: Option<RemoteSettings>,
     /// Automatic context-limit guard for Claude sessions. Byte-compatible
@@ -310,15 +304,16 @@ fn default_session_detail_font_size() -> u32 {
     12
 }
 
-fn default_terminal_shell() -> String {
-    #[cfg(target_os = "windows")]
-    {
-        "cmd.exe".to_string()
-    }
-    #[cfg(not(target_os = "windows"))]
-    {
-        "bash".to_string()
-    }
+/// Which terminal runtime a card launches into. Picked per card on the gate
+/// panel — there is no global default. Lives on `Link.card_runtime`; this
+/// enum is shared so both `Link` and any future Settings code can refer to
+/// the same canonical type. Serialized as the lowercase variant name so the
+/// JSON values match the TS string union (`"windows"` / `"wsl"`).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum CardRuntime {
+    Windows,
+    Wsl,
 }
 
 fn default_issue_template() -> String {
@@ -327,12 +322,10 @@ fn default_issue_template() -> String {
 
 /// First time the settings file is read on this process, peek at the raw JSON
 /// to see whether it came from the macOS app. macOS doesn't write the
-/// Windows-only keys (`terminalShell`, `terminalFontSize`, `editor`); when
+/// Windows-only keys (`terminalFontSize`, `editor`, `cardRuntime`); when
 /// they're absent serde's `#[serde(default)]` silently backfills the Windows
-/// defaults. We use `terminalShell` alone as the sentinel — adding more keys
-/// to the AND would just create false negatives if a Windows user explicitly
-/// cleared one. A new Windows-only field does NOT need to be added to the
-/// check; just keep this comment up to date.
+/// defaults. We use `terminalFontSize` alone as the sentinel — `cardRuntime`
+/// has no default so its absence isn't macOS-specific.
 ///
 /// No `schema_version` field is added — that would break the macOS byte-compat
 /// invariant (sortedKeys+prettyPrinted JSON shared with the Swift app).
@@ -346,11 +339,11 @@ fn log_cross_platform_backfill_once(raw: &[u8]) {
         Some(o) => o,
         None => return,
     };
-    if !obj.contains_key("terminalShell") {
+    if !obj.contains_key("terminalFontSize") {
         let _ = LOGGED.set(());
         crate::logging::info(
             "settings",
-            "settings.json missing terminalShell/terminalFontSize — backfilling Windows defaults (file appears to originate from macOS)",
+            "settings.json missing terminalFontSize — backfilling Windows defaults (file appears to originate from macOS)",
         );
     }
 }

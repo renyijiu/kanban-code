@@ -269,21 +269,6 @@ function GeneralSection({
         </p>
       </FieldGroup>
 
-      <FieldGroup label="Terminal shell" themeTokens={c}>
-        <input
-          type="text"
-          value={settings.terminalShell || "cmd.exe"}
-          onChange={(e) => onChange({ ...settings, terminalShell: e.target.value })}
-          placeholder="cmd.exe"
-          spellCheck={false}
-          className="w-full rounded-xl px-3 py-2.5 text-sm font-mono outline-none transition-colors"
-          style={inputStyle(c)}
-        />
-        <p className="text-[11px] mt-1" style={{ color: c.textMuted }}>
-          Command used by the embedded terminal. Default <Code c={c}>cmd.exe</Code> for native Windows. Set to <Code c={c}>wsl.exe</Code> to run Claude inside WSL, or e.g. <Code c={c}>pwsh.exe -NoLogo</Code>. Takes effect on the next terminal launch.
-        </p>
-      </FieldGroup>
-
       <FieldGroup label="Prompt template" themeTokens={c}>
         <textarea
           rows={3}

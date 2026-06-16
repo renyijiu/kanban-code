@@ -32,6 +32,7 @@ import {
   apiServiceNeedsSeparator,
   type APIService,
   type AssistantId,
+  type CardRuntime,
   type Project,
 } from "../types";
 import { useTheme, t } from "../theme";
@@ -64,6 +65,42 @@ function slugifyHandle(title: string): string {
   return slug || "card";
 }
 
+// Render the prior session transcript as ANSI-coloured text so it can be
+// pre-written into the xterm scrollback. The live PTY's first prompt lands
+// right under this seed — scrolling up inside the terminal then surfaces
+// real session history, no separate overlay. xterm needs CRLF, not LF.
+function formatTranscriptScrollback(turns: Turn[]): string {
+  if (!turns.length) return "";
+  const RESET = "\x1b[0m";
+  const DIM = "\x1b[2m";
+  const USER = "\x1b[36m";
+  const ASSIST = "\x1b[35m";
+  const out: string[] = [];
+  const normalize = (s: string) => s.replace(/\r\n|\r|\n/g, "\r\n");
+  for (const t of turns) {
+    const ts = t.timestamp ? new Date(t.timestamp).toLocaleString() : "";
+    const tag = t.role === "user" ? `${USER}▶ user${RESET}` : `${ASSIST}◀ assistant${RESET}`;
+    out.push(`${tag}${ts ? ` ${DIM}· ${ts}${RESET}` : ""}`);
+    for (const block of t.contentBlocks) {
+      if (block.kind === "text") {
+        out.push(normalize(block.text));
+      } else if (block.kind === "thinking") {
+        const slice = block.text.length > 240 ? block.text.slice(0, 240) + "…" : block.text;
+        out.push(`${DIM}[thinking] ${normalize(slice)}${RESET}`);
+      } else if (block.kind === "tool_use") {
+        out.push(`${DIM}⚙ ${normalize(block.text)}${RESET}`);
+      } else if (block.kind === "tool_result") {
+        const slice = block.text.length > 400 ? block.text.slice(0, 400) + "…" : block.text;
+        out.push(`${DIM}↳ ${normalize(slice)}${RESET}`);
+      }
+    }
+    out.push("");
+  }
+  out.push(`${DIM}── session resumes below ──${RESET}`);
+  out.push("");
+  return out.join("\r\n");
+}
+
 export default function CardDetailView() {
   const { selectedCard, selectCard, renameCard, deleteCard } = useBoardStore();
   const card = selectedCard();
@@ -89,7 +126,6 @@ export default function CardDetailView() {
   // Settings
   const [terminalFontSize, setTerminalFontSize] = useState(15);
   const [sessionDetailFontSize, setSessionDetailFontSize] = useState(12);
-  const [terminalShell, setTerminalShell] = useState<string>("cmd.exe");
   // APIService bindings — captured once at mount and used to resolve the
   // per-card endpoint at launch time. We don't refresh on every settings
   // change to keep the resolved command stable during a live session.
@@ -165,7 +201,6 @@ export default function CardDetailView() {
       .then((s) => {
         setTerminalFontSize(s.terminalFontSize || 15);
         setSessionDetailFontSize(s.sessionDetailFontSize || 12);
-        setTerminalShell((s.terminalShell && s.terminalShell.trim()) || "cmd.exe");
         setAvailableProjects(s.projects ?? []);
         setApiServices(s.apiServices ?? []);
         setDefaultAPIServiceIds(s.defaultAPIServiceIds ?? {});
@@ -176,10 +211,17 @@ export default function CardDetailView() {
       .catch(() => setTmuxAvailable(false));
   }, []);
 
-  // Reset state when card changes
+  // Reset state when card changes. For cards with both a session AND a
+  // picked runtime, this also auto-resumes the terminal — load all
+  // transcript pages, then flip `terminalActive` true so the drawer drops
+  // straight into the live session. The runtime gate panel handles the
+  // no-runtime case; fresh launches (promptBody only) still go through
+  // LaunchConfirmationDialog.
   useEffect(() => {
     if (!card) return;
-    const hasTerminal = !!card.link.sessionLink?.sessionId || !!card.link.promptBody;
+    const sid = card.link.sessionLink?.sessionId;
+    const runtime = card.link.cardRuntime;
+    const hasTerminal = !!sid || !!card.link.promptBody;
     setActiveTab(hasTerminal ? "terminal" : "history");
     setTurns([]);
     setTranscriptPage(null);
@@ -188,10 +230,50 @@ export default function CardDetailView() {
     setSearchText("");
     setSearchMatches([]);
     setCurrentMatchIdx(0);
-    if (card.link.sessionLink?.sessionId) {
-      loadTranscript(card.link.sessionLink.sessionId, 0, true);
-    }
+
+    if (!sid) return;
+
+    let cancelled = false;
+    (async () => {
+      setLoadingTranscript(true);
+      const collected: Turn[] = [];
+      let lastPage: TranscriptPage | null = null;
+      try {
+        let offset = 0;
+        // Walk the full transcript so the scrollback seed below carries
+        // every prior turn, not just page 1. Local file reads — fast.
+        while (true) {
+          const page = await getTranscript(sid, offset);
+          if (cancelled) return;
+          collected.push(...page.turns);
+          lastPage = page;
+          if (!page.hasMore) break;
+          offset = page.nextOffset;
+        }
+      } catch {
+        // silent — terminal still launches, just without seeded scrollback
+      } finally {
+        if (!cancelled) setLoadingTranscript(false);
+      }
+      if (cancelled) return;
+      setTurns(collected);
+      setTranscriptPage(lastPage);
+      // Auto-resume: with a runtime already picked, jump straight in. No
+      // Resume click required. TerminalView reads the formatted scrollback
+      // from props at mount time, so `turns` must be set first.
+      if (runtime) setTerminalActive(true);
+    })();
+
+    return () => { cancelled = true; };
   }, [card?.id]);
+
+  // If the user picks a runtime from the gate panel after the drawer is
+  // already open, kick the terminal on without making them click Resume.
+  useEffect(() => {
+    if (card?.link.sessionLink?.sessionId && card?.link.cardRuntime && !terminalActive) {
+      setTerminalActive(true);
+    }
+  }, [card?.link.cardRuntime]);
 
   // Sync queued prompts when card data updates
   useEffect(() => {
@@ -250,6 +332,20 @@ export default function CardDetailView() {
   const issue = card.link.issueLink;
   const promptBody = card.link.promptBody;
   const canTerminal = !!sessionId || !!promptBody;
+  const cardRuntime = card.link.cardRuntime ?? null;
+
+  // Persist a runtime pick to the card's Link. The gate panel buttons call
+  // this; the choice survives drawer close / app restart because it lives
+  // in links.json. We trigger a board refresh so the local card data
+  // reflects the new runtime without remount.
+  const pickCardRuntime = async (runtime: CardRuntime) => {
+    try {
+      await invoke("set_card_runtime", { cardId: card.id, runtime });
+      await useBoardStore.getState().refresh();
+    } catch (e) {
+      useBoardStore.setState({ error: String(e) });
+    }
+  };
 
   const handleRename = () => {
     if (editName.trim()) renameCard(card.id, editName.trim());
@@ -336,14 +432,12 @@ export default function CardDetailView() {
     }
   };
 
-  // Split the user-configurable shell string into [exe, ...args]. Default is
-  // cmd.exe so the app is Windows-native out of the box; setting it to
-  // "wsl.exe" launches Claude inside WSL instead.
-  const baseShell = terminalShell.trim().split(/\s+/).filter(Boolean);
-  const shellExe = (baseShell[0] ?? "cmd.exe").toLowerCase();
-  const isUnixShell = /(^|[\\/])(wsl|bash|sh|zsh|fish)(\.exe)?$/.test(shellExe);
-  // tmux requires a Unix shell AND a working `tmux -V` inside it.
-  const useTmux = isUnixShell && tmuxAvailable;
+  // Picked once per install via Settings → Card runtime. While `null`, the
+  // terminal tab below renders a "Pick Windows or WSL in Settings" notice
+  // instead of spawning a shell.
+  const isWsl = cardRuntime === "wsl";
+  // tmux requires WSL AND a working `tmux -V` inside it.
+  const useTmux = isWsl && tmuxAvailable;
 
   const assistantId: AssistantId = (card.link.assistantId ?? "claude") as AssistantId;
   const cli = ASSISTANT_CLI[assistantId] ?? "claude";
@@ -512,13 +606,13 @@ export default function CardDetailView() {
         terminalInput: "",
       };
     }
-    if (isUnixShell) {
-      // bash without tmux — fall back to type-after-spawn so non-tmux WSL
-      // users still get a working terminal (just no reattach).
-      return { shellCommand: baseShell, terminalInput: `${innerBashCmd}\r` };
+    if (isWsl) {
+      // WSL without tmux — type-after-spawn so users still get a working
+      // terminal (just no reattach across drawer close/reopen).
+      return { shellCommand: ["wsl.exe"], terminalInput: `${innerBashCmd}\r` };
     }
-    // Native Windows shell.
-    return { shellCommand: baseShell, terminalInput: `${innerCmdShellCmd}\r` };
+    // Native Windows.
+    return { shellCommand: ["cmd.exe"], terminalInput: `${innerCmdShellCmd}\r` };
   })();
 
   // Pull the current window list whenever the terminal becomes active in
@@ -674,6 +768,12 @@ export default function CardDetailView() {
   };
 
   const handleStartTerminal = () => {
+    // No runtime picked — flip to the terminal tab so the gate panel becomes
+    // visible and asks Windows-or-WSL inline. No bounce to Settings.
+    if (!cardRuntime) {
+      setActiveTab("terminal");
+      return;
+    }
     // Resumes — no choices to make, jump straight in.
     if (sessionId) {
       setTerminalActive(true);
@@ -687,12 +787,14 @@ export default function CardDetailView() {
 
   // Auto-open the launch dialog for freshly created tasks so the user sees
   // the command preview before Claude starts churning. They can cancel out.
+  // Gated on cardRuntime — without a chosen runtime the dialog's preview
+  // would be wrong, so the gate panel below handles the prompt instead.
   useEffect(() => {
-    if (!sessionId && promptBody && !terminalActive && !showLaunchDialog && !launchFlags) {
+    if (!sessionId && promptBody && !terminalActive && !showLaunchDialog && !launchFlags && cardRuntime) {
       setShowLaunchDialog(true);
       setActiveTab("terminal");
     }
-  }, [card.id]);
+  }, [card.id, cardRuntime]);
 
   // Queued prompt handlers
   const handleAddPrompt = async (body: string, sendAutomatically: boolean, imagePaths?: string[]) => {
@@ -998,7 +1100,47 @@ export default function CardDetailView() {
         className="flex-1 overflow-hidden flex flex-col min-h-0"
         style={{ background: activeTab === "terminal" && terminalActive ? "#0a0a0c" : undefined }}
       >
-        {activeTab === "terminal" && canTerminal && (
+        {activeTab === "terminal" && canTerminal && !cardRuntime && (
+          <div className="flex flex-col items-center justify-center flex-1 gap-5 p-8">
+            <div className="text-center max-w-sm">
+              <p className="text-[13px] font-medium" style={{ color: c.textSecondary }}>
+                Pick a runtime for this card
+              </p>
+              <p className="text-[12px] mt-1" style={{ color: c.textDim }}>
+                {projectPath?.startsWith("/")
+                  ? <>This project lives under <span className="font-mono" style={{ color: c.textSecondary }}>/</span> so WSL is the natural pick. Saved per-card.</>
+                  : projectPath
+                  ? <>Choose Windows for projects under <span className="font-mono" style={{ color: c.textSecondary }}>C:\</span>, or WSL for ones under <span className="font-mono" style={{ color: c.textSecondary }}>/home/</span>. Saved per-card.</>
+                  : <>Choose where Claude launches for this card. Saved per-card.</>}
+              </p>
+            </div>
+            <div className="grid grid-cols-2 gap-3 w-full max-w-sm">
+              {([
+                { id: "windows", label: "Windows", hint: "cmd.exe" },
+                { id: "wsl", label: "WSL", hint: "wsl.exe + bash" },
+              ] as const).map((opt) => (
+                <button
+                  key={opt.id}
+                  onClick={() => pickCardRuntime(opt.id)}
+                  className="rounded-xl px-4 py-3 text-left transition-colors"
+                  style={{
+                    background: c.bgAccent("0.04"),
+                    border: `1px solid ${c.border}`,
+                    color: c.textPrimary,
+                  }}
+                  onMouseEnter={(e) => { e.currentTarget.style.borderColor = "#4f8ef7"; e.currentTarget.style.background = c.bgAccent("0.08"); }}
+                  onMouseLeave={(e) => { e.currentTarget.style.borderColor = c.border; e.currentTarget.style.background = c.bgAccent("0.04"); }}
+                >
+                  <div className="text-sm font-medium">{opt.label}</div>
+                  <div className="text-[11px] mt-0.5 font-mono" style={{ color: c.textMuted }}>
+                    {opt.hint}
+                  </div>
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
+        {activeTab === "terminal" && canTerminal && cardRuntime && (
           terminalActive ? (
             <div className="flex-1 flex flex-col min-h-0">
               <QueuedPromptsBar
@@ -1061,6 +1203,7 @@ export default function CardDetailView() {
                 onExit={() => {}}
                 writeRef={terminalWriteRef}
                 fontSize={terminalFontSize}
+                initialScrollback={sessionId ? formatTranscriptScrollback(turns) : undefined}
               />
             </div>
           ) : (
@@ -1190,7 +1333,7 @@ export default function CardDetailView() {
           canCreateWorktree={false}
           initialSkipPermissions={false}
           buildCommand={(f) =>
-            isUnixShell
+            isWsl
               ? buildInnerBashCmd(projectPath, sessionId ?? null, f.prompt, f.dangerouslySkipPermissions, f.envPrefix)
               : buildInnerCmdShellCmd(projectPath, sessionId ?? null, f.prompt, f.dangerouslySkipPermissions, f.envPrefix)
           }

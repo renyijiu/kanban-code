@@ -19,6 +19,11 @@ interface Props {
   writeRef?: React.MutableRefObject<((text: string) => void) | null>;
   /** Terminal font size (default 15) */
   fontSize?: number;
+  /** ANSI-formatted text pre-written into the xterm scrollback *before* the
+   *  PTY spawns. Lets us seed the buffer with the resumed session's prior
+   *  turns so scrolling up inside the terminal shows real history — no
+   *  separate overlay or tab to chase. */
+  initialScrollback?: string;
 }
 
 const DARK_THEME = {
@@ -69,11 +74,14 @@ const LIGHT_THEME = {
   brightWhite: "#8c959f",
 };
 
-export default function TerminalView({ ptyId, command, initialInput, onExit, writeRef, fontSize = 15 }: Props) {
+export default function TerminalView({ ptyId, command, initialInput, onExit, writeRef, fontSize = 15, initialScrollback }: Props) {
   const termRef = useRef<HTMLDivElement>(null);
   const xtermRef = useRef<XTerm | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
   const ptyRef = useRef<IPty | null>(null);
+  // `initialScrollback` is consumed once at mount. Stash in a ref so future
+  // prop changes don't try to re-seed an already-running terminal.
+  const initialScrollbackRef = useRef(initialScrollback);
   const { theme } = useTheme();
 
   const doFit = useCallback(() => {
@@ -101,7 +109,10 @@ export default function TerminalView({ ptyId, command, initialInput, onExit, wri
       cursorStyle: "bar",
       theme: DARK_THEME,
       allowProposedApi: true,
-      scrollback: 5000,
+      // Generous scrollback so a freshly-seeded transcript (potentially
+      // hundreds of turns) survives the live PTY scroll without getting
+      // clipped from the top.
+      scrollback: 20000,
     });
 
     const fitAddon = new FitAddon();
@@ -112,6 +123,13 @@ export default function TerminalView({ ptyId, command, initialInput, onExit, wri
     xterm.open(termRef.current);
     xtermRef.current = xterm;
     fitRef.current = fitAddon;
+
+    // Seed the scrollback with the prior session transcript *before* the
+    // PTY's first prompt arrives, so the live shell shows up directly under
+    // the historical turns instead of interleaving with them.
+    if (initialScrollbackRef.current) {
+      xterm.write(initialScrollbackRef.current);
+    }
 
     // Initial fit + spawn — delay to let flex layout compute dimensions
     setTimeout(() => {
