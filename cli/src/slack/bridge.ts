@@ -759,9 +759,12 @@ export async function runSlackBridge(opts: BridgeOptions): Promise<void> {
   };
   const schedulePendingResolve = (): void => {
     if (!pending.length) return;
-    setTimeout(async () => {
-      await resolvePendingOnce();
-      schedulePendingResolve(); // re-arm only while agents remain pending
+    setTimeout(() => {
+      // Always re-arm (while agents remain pending) even if a pass throws — an
+      // unexpected error in one pass must not silently kill the self-heal chain.
+      resolvePendingOnce()
+        .catch((e) => console.error("pending-resolve pass failed (will retry):", e))
+        .finally(() => schedulePendingResolve());
     }, RESOLVE_RETRY_MS);
   };
   if (pending.length) {
