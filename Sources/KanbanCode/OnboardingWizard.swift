@@ -25,6 +25,7 @@ struct OnboardingWizard: View {
     @State private var wizardServiceBaseURL: [CodingAssistant: String] = [:]
     @State private var wizardServiceSaved: Set<CodingAssistant> = []
     @State private var existingDefaultServiceIds: [String: String] = [:]
+    @State private var codexBoard = CodexBoardSettings()
 
     /// Steps are built dynamically: Welcome, Assistants, [per-assistant hooks...], Dependencies, Notifications, Complete.
     private var steps: [OnboardingStep] {
@@ -113,6 +114,7 @@ struct OnboardingWizard: View {
                         Task {
                             var settings = (try? await settingsStore.read()) ?? Settings()
                             settings.hasCompletedOnboarding = true
+                            settings.codexBoard = codexBoard
                             try? await settingsStore.write(settings)
                         }
                         onComplete()
@@ -126,6 +128,7 @@ struct OnboardingWizard: View {
         .task {
             await refreshStatus()
             if let settings = try? await settingsStore.read() {
+                codexBoard = settings.codexBoard
                 existingDefaultServiceIds = settings.defaultAPIServiceIds
                 for assistant in CodingAssistant.allCases {
                     guard let serviceId = settings.defaultAPIServiceIds[assistant.rawValue],
@@ -276,6 +279,26 @@ struct OnboardingWizard: View {
                 }
             }
 
+            Divider()
+
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Codex task runtime")
+                    .font(.app(.callout, weight: .semibold))
+                Picker("Codex task runtime", selection: $codexBoard.runtime) {
+                    Text("Codex App")
+                        .tag(CodexRuntimeBackend.app)
+                        .disabled(status?.codexDesktopAvailable != true || status?.codexAppServerAvailable != true)
+                    Text("Codex CLI + tmux")
+                        .tag(CodexRuntimeBackend.cliTmux)
+                        .disabled(status?.codexAvailable != true || status?.tmuxAvailable != true)
+                }
+                .pickerStyle(.segmented)
+
+                Text(codexRuntimeHelp)
+                    .font(.app(.caption))
+                    .foregroundStyle(.secondary)
+            }
+
             let anyMissing = CodingAssistant.allCases.contains { assistant in
                 guard enabledAssistants.contains(assistant) else { return false }
                 switch assistant {
@@ -332,6 +355,23 @@ struct OnboardingWizard: View {
             Spacer()
         }
         .padding(24)
+    }
+
+    private var codexRuntimeHelp: String {
+        switch codexBoard.runtime {
+        case .app:
+            if status?.codexDesktopAvailable != true || status?.codexAppServerAvailable != true {
+                return "Codex App mode needs Codex.app plus a compatible `codex app-server` executable."
+            }
+            return "Tasks open as Codex desktop threads; managed approvals and lifecycle use App Server."
+        case .cliTmux:
+            if status?.codexAvailable != true || status?.tmuxAvailable != true {
+                return "CLI mode needs both `codex` and `tmux`. You can finish setup and install them later."
+            }
+            return "Tasks run in persistent tmux sessions and can be attached from the app or Terminal."
+        case .unknown:
+            return "Choose how newly queued Codex tasks should run."
+        }
     }
 
     // MARK: - Step: Hooks (per-assistant)

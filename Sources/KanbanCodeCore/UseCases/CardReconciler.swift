@@ -88,6 +88,8 @@ public enum CardReconciler {
             if let cardId, var link = linksById[cardId] {
                 // Archived cards stay archived — just mark matched to prevent duplicates
                 if link.manuallyArchived {
+                    enrichRuntimeIdentity(link: &link, from: session)
+                    linksById[cardId] = link
                     matchedSessionIds.insert(session.id)
                     continue
                 }
@@ -106,6 +108,7 @@ public enum CardReconciler {
                 // Different sessionId (e.g., shell tab session) — just mark matched,
                 // don't overwrite the card's primary session.
                 link.lastActivity = session.modifiedTime
+                enrichRuntimeIdentity(link: &link, from: session)
                 if link.projectPath == nil, let pp = session.projectPath {
                     link.projectPath = pp
                 }
@@ -152,7 +155,9 @@ public enum CardReconciler {
                     sessionLink: SessionLink(
                         sessionId: session.id,
                         sessionPath: session.jsonlPath
-                    )
+                    ),
+                    executionBinding: executionBinding(from: session),
+                    assistant: session.assistant
                 )
                 linksById[newLink.id] = newLink
                 cardIdBySessionId[session.id] = newLink.id
@@ -475,6 +480,26 @@ public enum CardReconciler {
         }
 
         return Array(linksById.values)
+    }
+
+    private static func enrichRuntimeIdentity(link: inout Link, from session: Session) {
+        if link.assistant == nil { link.assistant = session.assistant }
+        if link.executionBinding == nil {
+            link.executionBinding = executionBinding(from: session)
+        }
+    }
+
+    private static func executionBinding(from session: Session) -> CodexExecutionBinding? {
+        guard session.assistant == .codex, let provenance = session.runtimeProvenance else { return nil }
+        return CodexExecutionBinding(
+            backend: provenance.backend,
+            ownership: provenance.ownership,
+            evidence: provenance.evidence,
+            telemetryQuality: provenance.telemetryQuality,
+            threadId: provenance.backend == .app ? session.id : nil,
+            sessionId: session.id,
+            boundAt: provenance.observedAt
+        )
     }
 
     // MARK: - Private

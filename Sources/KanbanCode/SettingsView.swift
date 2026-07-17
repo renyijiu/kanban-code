@@ -598,6 +598,11 @@ struct GeneralSettingsView: View {
     @State private var showOnboarding = false
     @State private var mergeCommand: String = GitHubSettings.defaultMergeCommand
     @State private var mergeSaveTask: Task<Void, Never>?
+    @State private var codexBoard = CodexBoardSettings()
+    @State private var codexDependencyStatus: DependencyChecker.Status?
+    @State private var codexSettingsMessage: String?
+    @State private var codexSaveTask: Task<Void, Never>?
+    @State private var codexHooksInstalled = false
 
     private let settingsStore = SettingsStore()
 
@@ -654,6 +659,72 @@ struct GeneralSettingsView: View {
                 statusRow("GitHub CLI (gh)", available: ghAvailable)
             }
 
+            Section("Codex Board") {
+                Picker("Runtime", selection: Binding(
+                    get: { codexBoard.runtime },
+                    set: { selectCodexRuntime($0) }
+                )) {
+                    Text("Codex App").tag(CodexRuntimeBackend.app)
+                    Text("Codex CLI + tmux").tag(CodexRuntimeBackend.cliTmux)
+                }
+
+                HStack {
+                    Text("Managed concurrency")
+                    Spacer()
+                    Text("\(codexBoard.maxConcurrency)")
+                        .foregroundStyle(.secondary)
+                        .monospacedDigit()
+                    Stepper("", value: Binding(
+                        get: { codexBoard.maxConcurrency },
+                        set: {
+                            codexBoard.maxConcurrency = $0
+                            scheduleCodexSettingsSave()
+                        }
+                    ), in: CodexBoardSettings.concurrencyRange)
+                    .labelsHidden()
+                }
+
+                statusRow("Codex desktop navigation", available: codexDependencyStatus?.codexDesktopAvailable ?? false)
+                statusRow("Codex App Server", available: codexDependencyStatus?.codexAppServerAvailable ?? false)
+                statusRow("Codex CLI", available: codexDependencyStatus?.codexAvailable ?? false)
+                statusRow("tmux runtime", available: tmuxAvailable)
+
+                HStack {
+                    Label(
+                        "Lifecycle Hooks",
+                        systemImage: codexHooksInstalled ? "checkmark.circle.fill" : "minus.circle"
+                    )
+                    .foregroundStyle(codexHooksInstalled ? .green : .secondary)
+                    Spacer()
+                    if codexHooksInstalled {
+                        Button("Uninstall") { uninstallCodexHooks() }
+                            .controlSize(.small)
+                    } else {
+                        Button("Install…") { installCodexHooks() }
+                            .controlSize(.small)
+                    }
+                }
+
+                if let path = codexDependencyStatus?.codexExecutablePath {
+                    LabeledContent("Resolved executable") {
+                        Text(path)
+                            .font(.system(.caption, design: .monospaced))
+                            .textSelection(.enabled)
+                    }
+                    if let version = codexDependencyStatus?.codexVersion {
+                        LabeledContent("Version", value: version)
+                    }
+                }
+                if let codexSettingsMessage {
+                    Text(codexSettingsMessage)
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                }
+                Text("Switching runtime pauses only the hidden queue. Sessions that are already running continue and remain available in All Sessions.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
             Section("Permissions") {
                 VStack(alignment: .leading, spacing: 8) {
                     Text("Agents launched by Kanban Code inherit Kanban Code's macOS privacy permissions. Grant Full Disk Access once to stop repeated prompts when agents read protected app data or new project folders.")
@@ -708,6 +779,13 @@ struct GeneralSettingsView: View {
                 .controlSize(.small)
             }
         }
+        .task {
+            if let settings = try? await settingsStore.read() {
+                codexBoard = settings.codexBoard
+            }
+            codexDependencyStatus = await DependencyChecker.checkAll(settingsStore: settingsStore)
+            codexHooksInstalled = codexHooksAreCurrent()
+        }
         .formStyle(.grouped)
         .padding()
         .onAppear {
@@ -725,6 +803,99 @@ struct GeneralSettingsView: View {
                     showOnboarding = false
                 }
             )
+        }
+    }
+
+    private func selectCodexRuntime(_ runtime: CodexRuntimeBackend) {
+        guard runtime != .unknown else { return }
+        let available: Bool
+        switch runtime {
+        case .app:
+            available = codexDependencyStatus?.codexDesktopAvailable == true
+                && codexDependencyStatus?.codexAppServerAvailable == true
+            if !available {
+                codexSettingsMessage = "Codex App mode requires both Codex.app and a compatible `codex app-server` executable."
+            }
+        case .cliTmux:
+            available = codexDependencyStatus?.codexAvailable == true && tmuxAvailable
+            if !available {
+                codexSettingsMessage = "Codex CLI + tmux mode requires both `codex` and `tmux`."
+            }
+        case .unknown:
+            available = false
+        }
+        guard available else { return }
+        codexSettingsMessage = nil
+        codexBoard.runtime = runtime
+        scheduleCodexSettingsSave()
+    }
+
+    private func scheduleCodexSettingsSave() {
+        codexSaveTask?.cancel()
+        let snapshot = codexBoard
+        codexSaveTask = Task {
+            try? await Task.sleep(for: .milliseconds(250))
+            guard !Task.isCancelled else { return }
+            do {
+                var settings = try await settingsStore.read()
+                settings.codexBoard = snapshot
+                try await settingsStore.write(settings)
+                NotificationCenter.default.post(name: .kanbanCodeSettingsChanged, object: nil)
+            } catch {
+                await MainActor.run { codexSettingsMessage = error.localizedDescription }
+            }
+        }
+    }
+
+    private func installCodexHooks() {
+        do {
+            let executableDirectory = Bundle.main.executableURL?.deletingLastPathComponent()
+            let bundled = Bundle.main.bundleURL
+                .appendingPathComponent("Contents/Helpers/kanban-code-lifecycle").path
+            let development = executableDirectory?
+                .appendingPathComponent("kanban-code-lifecycle").path
+            let source = FileManager.default.isExecutableFile(atPath: bundled) ? bundled : development
+            guard let source else {
+                codexSettingsMessage = "The lifecycle helper is missing. Rebuild the app bundle and try again."
+                return
+            }
+            let expectedHash: String
+            let manifest = Bundle.main.bundleURL
+                .appendingPathComponent("Contents/Resources/codex-lifecycle.sha256").path
+            if let signedHash = try? String(contentsOfFile: manifest, encoding: .utf8), !signedHash.isEmpty {
+                expectedHash = signedHash
+            } else {
+                // SwiftPM development builds have no signed app bundle yet.
+                expectedHash = try CodexHookInstaller.sha256(path: source)
+            }
+            let installedPath = try CodexHookInstaller.deployHelper(
+                from: source,
+                expectedSHA256: expectedHash
+            )
+            try CodexHookInstaller.install(helperPath: installedPath)
+            codexHooksInstalled = true
+            codexSettingsMessage = "Lifecycle Hooks installed. Existing Codex configuration was preserved and backed up."
+        } catch {
+            codexSettingsMessage = "Could not install Lifecycle Hooks: \(error.localizedDescription)"
+        }
+    }
+
+    private func codexHooksAreCurrent() -> Bool {
+        let manifest = Bundle.main.bundleURL
+            .appendingPathComponent("Contents/Resources/codex-lifecycle.sha256").path
+        guard let expected = try? String(contentsOfFile: manifest, encoding: .utf8) else {
+            return CodexHookInstaller.isInstalled()
+        }
+        return CodexHookInstaller.isInstalled(expectedHelperSHA256: expected)
+    }
+
+    private func uninstallCodexHooks() {
+        do {
+            try CodexHookInstaller.uninstall()
+            codexHooksInstalled = false
+            codexSettingsMessage = "Kanban Code Lifecycle Hooks were removed; unrelated Codex hooks were preserved."
+        } catch {
+            codexSettingsMessage = "Could not uninstall Lifecycle Hooks: \(error.localizedDescription)"
         }
     }
 

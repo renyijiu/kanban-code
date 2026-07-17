@@ -52,6 +52,7 @@ struct DroppableColumnView: View {
     var onMigrateAssistant: (String, CodingAssistant) -> Void = { _, _ in }
     var onRefreshBacklog: (() -> Void)?
     var onCardClicked: (String) -> Void = { _ in }
+    var onOpenRuntimeSession: (String) -> Void = { _ in }
     var onColumnBackgroundClick: (KanbanCodeColumn) -> Void = { _ in }
 
     @State private var isTargeted = false
@@ -286,7 +287,8 @@ struct DroppableColumnView: View {
             onMoveToProject: { projectPath in onMoveToProject(card.id, projectPath) },
             onMoveToFolder: { onMoveToFolder(card.id) },
             enabledAssistants: enabledAssistants,
-            onMigrateAssistant: { target in onMigrateAssistant(card.id, target) }
+            onMigrateAssistant: { target in onMigrateAssistant(card.id, target) },
+            onOpenRuntimeSession: { onOpenRuntimeSession(card.id) }
         )
     }
 }

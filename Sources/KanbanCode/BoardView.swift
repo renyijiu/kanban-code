@@ -35,6 +35,7 @@ struct BoardView: View {
     var onMergeCards: (String, String) -> Void = { _, _ in }   // (sourceId, targetId)
     var onNewTask: () -> Void = {}
     var onCardClicked: (String) -> Void = { _ in }
+    var onOpenRuntimeSession: (String) -> Void = { _ in }
     var onColumnBackgroundClick: (KanbanCodeColumn) -> Void = { _ in }
 
     var body: some View {
@@ -44,7 +45,7 @@ struct BoardView: View {
     @ViewBuilder
     private var channelsPseudoColumn: some View {
         let channels = store.state.channels
-        let pinnedCards = store.state.pinnedCards
+        let pinnedCards = store.state.codexBoardCards.filter(\.link.isPinned)
         if !channels.isEmpty || !pinnedCards.isEmpty {
             VStack(alignment: .leading, spacing: 8) {
                 if !channels.isEmpty {
@@ -149,7 +150,7 @@ struct BoardView: View {
                     ForEach(store.state.visibleColumns, id: \.self) { column in
                         DroppableColumnView(
                             column: column,
-                            cards: store.state.unpinnedCards(in: column),
+                            cards: store.state.codexBoardCards(in: column).filter { !$0.link.isPinned },
                             selectedCardId: Binding(
                                 get: { store.state.selectedCardId },
                                 set: { store.dispatch(.selectCard(cardId: $0)) }
@@ -189,6 +190,7 @@ struct BoardView: View {
                             onMigrateAssistant: onMigrateAssistant,
                             onRefreshBacklog: column == .backlog ? onRefreshBacklog : nil,
                             onCardClicked: onCardClicked,
+                            onOpenRuntimeSession: onOpenRuntimeSession,
                             onColumnBackgroundClick: onColumnBackgroundClick
                         )
                         .id(column)
@@ -201,14 +203,14 @@ struct BoardView: View {
             .onChange(of: store.state.selectedCardId) {
                 // Scroll to the column containing the selected card
                 guard let selectedId = store.state.selectedCardId else { return }
-                if store.state.pinnedCards.contains(where: { $0.id == selectedId }) {
+                if store.state.codexBoardCards.contains(where: { $0.id == selectedId && $0.link.isPinned }) {
                     withAnimation(.easeInOut(duration: 0.25)) {
                         proxy.scrollTo("channels", anchor: .leading)
                     }
                     return
                 }
                 for col in store.state.visibleColumns {
-                    if store.state.cards(in: col).contains(where: { $0.id == selectedId }) {
+                    if store.state.codexBoardCards(in: col).contains(where: { $0.id == selectedId }) {
                         withAnimation(.easeInOut(duration: 0.25)) {
                             proxy.scrollTo(col, anchor: .center)
                         }
@@ -246,16 +248,16 @@ struct BoardView: View {
         .animation(.easeInOut(duration: 0.25), value: store.state.error != nil)
         // Empty board hint
         .overlay {
-            if store.state.filteredCards.isEmpty && !store.state.isLoading {
+            if store.state.codexBoardCards.isEmpty && !store.state.isLoading {
                 VStack(spacing: 12) {
                     if let projectPath = store.state.selectedProjectPath {
                         let name = store.state.configuredProjects.first(where: { $0.path == projectPath })?.name
                             ?? (projectPath as NSString).lastPathComponent
-                        Text("No sessions yet for \(name)")
+                        Text("No \(store.state.codexBoardRuntime.boardLabel) sessions yet for \(name)")
                             .font(.app(.title3))
                             .foregroundStyle(.secondary)
                     } else {
-                        Text("No sessions found")
+                        Text("No \(store.state.codexBoardRuntime.boardLabel) sessions found")
                             .font(.app(.title3))
                             .foregroundStyle(.secondary)
                     }
@@ -276,7 +278,7 @@ struct BoardView: View {
             set: { if !$0 { renamingPinnedCardId = nil } }
         )) {
             if let cardId = renamingPinnedCardId,
-               let card = store.state.pinnedCards.first(where: { $0.id == cardId }) {
+               let card = store.state.codexBoardCards.first(where: { $0.id == cardId && $0.link.isPinned }) {
                 RenameSessionDialog(
                     currentName: card.link.name ?? card.displayTitle,
                     isPresented: Binding(
@@ -314,7 +316,8 @@ struct BoardView: View {
             onMoveToProject: { projectPath in onMoveToProject(card.id, projectPath) },
             onMoveToFolder: { onMoveToFolder(card.id) },
             enabledAssistants: enabledAssistants,
-            onMigrateAssistant: { target in onMigrateAssistant(card.id, target) }
+            onMigrateAssistant: { target in onMigrateAssistant(card.id, target) },
+            onOpenRuntimeSession: { onOpenRuntimeSession(card.id) }
         )
     }
 }

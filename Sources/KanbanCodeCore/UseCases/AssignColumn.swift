@@ -51,7 +51,7 @@ public enum AssignColumn {
 
         // PR exists and session not actively working → inReview
         // This skips Waiting when addressing review feedback: Claude stops → goes directly to In Review
-        if hasPR, let state = activityState,
+        if link.effectiveAssistant != .codex, hasPR, let state = activityState,
            state == .needsAttention || state == .idleWaiting || state == .ended || state == .stale {
             return .inReview
         }

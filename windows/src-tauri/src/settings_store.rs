@@ -227,6 +227,42 @@ impl APIService {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum CodexRuntimeBackend {
+    App,
+    CliTmux,
+    Unknown,
+}
+
+impl Default for CodexRuntimeBackend {
+    fn default() -> Self {
+        Self::CliTmux
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CodexBoardSettings {
+    #[serde(default)]
+    pub runtime: CodexRuntimeBackend,
+    #[serde(default = "default_codex_concurrency")]
+    pub max_concurrency: u32,
+}
+
+fn default_codex_concurrency() -> u32 {
+    3
+}
+
+impl Default for CodexBoardSettings {
+    fn default() -> Self {
+        Self {
+            runtime: CodexRuntimeBackend::default(),
+            max_concurrency: default_codex_concurrency(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct Settings {
@@ -272,6 +308,10 @@ pub struct Settings {
     /// default service. Matches macOS Settings.defaultAPIServiceIds.
     #[serde(default)]
     pub default_api_service_ids: HashMap<String, String>,
+    /// Byte-compatible with macOS Settings.codexBoard so a Windows write does
+    /// not erase the selected runtime or scheduler capacity.
+    #[serde(default)]
+    pub codex_board: CodexBoardSettings,
 }
 
 impl Settings {

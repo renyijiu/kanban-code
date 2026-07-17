@@ -275,5 +275,6 @@ fn new_discovered_link(session: &Session) -> Link {
         api_service_id: None,
         browser_tabs: None,
         card_runtime: None,
+        extra_fields: Default::default(),
     }
 }

@@ -15,6 +15,10 @@ export function settingsPath(): string {
   return join(kanbanHome(), "settings.json");
 }
 
+export function codexRuntimeStatePath(): string {
+  return join(kanbanHome(), "codex-runtime-state.json");
+}
+
 export function contextDir(): string {
   return join(kanbanHome(), "context");
 }

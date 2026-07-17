@@ -59,6 +59,12 @@ private struct RenameTarget: Identifiable, Equatable {
     var id: String { name }
 }
 
+struct CodexReviewTarget: Identifiable {
+    let cardId: String
+    let title: String
+    var id: String { cardId }
+}
+
 private enum DrawerNavigationTarget: Equatable {
     case card(String)
     case channel(String)
@@ -96,6 +102,7 @@ struct ContentView: View {
     @AppStorage("appearanceMode") var appearanceMode: AppearanceMode = .auto
     @AppStorage("boardViewMode") var boardViewModeRaw = BoardViewMode.kanban.rawValue
     @State var showProcessManager = false
+    @State var showAllSessions = false
     @AppStorage("killTmuxOnQuit") var killTmuxOnQuit = true
     @AppStorage("uiTextSize") var uiTextSize: Int = 1
     @AppStorage("detailExpanded") var detailExpandedPersisted = false
@@ -108,6 +115,8 @@ struct ContentView: View {
     @State var pendingTerminalSession: String?
     @State var showAddLinkCardId: String?
     @State var launchConfig: LaunchConfig?
+    @State var codexReviewTarget: CodexReviewTarget?
+    @State var codexPendingAction: CodexPendingAction?
     @State var syncStatuses: [String: SyncStatus] = [:]
     @State var isSyncRefreshing = false
     @State var showSyncPopover = false
@@ -143,6 +152,7 @@ struct ContentView: View {
     let assistantRegistry: CodingAssistantRegistry
     let launcher: LaunchSession
     let tmuxAdapter: TmuxAdapter
+    let codexBoardCoordinator: CodexBoardCoordinator
     let systemTray = SystemTray()
     let mutagenAdapter = MutagenAdapter()
     let hookEventsPath: String
@@ -200,7 +210,7 @@ struct ContentView: View {
         let geminiDiscovery = GeminiSessionDiscovery()
         let geminiDetector = GeminiActivityDetector()
         let geminiStore = GeminiSessionStore()
-        let codexDiscovery = CodexSessionDiscovery()
+        let codexDiscovery = CodexHybridSessionDiscovery()
         let codexDetector = CodexActivityDetector()
         let codexStore = CodexSessionStore()
 
@@ -222,6 +232,7 @@ struct ContentView: View {
         let coordination = CoordinationStore()
         let settings = SettingsStore()
         let tmux = TmuxAdapter()
+        let codexRuntimeStateStore = CodexRuntimeStateStore()
 
         let effectHandler = EffectHandler(
             coordinationStore: coordination,
@@ -230,7 +241,8 @@ struct ContentView: View {
                 NSPasteboard.general.clearContents()
                 NSPasteboard.general.setData(data, forType: .png)
             },
-            notifier: MacOSNotificationClient()
+            notifier: MacOSNotificationClient(),
+            codexRuntimeStateStore: codexRuntimeStateStore
         )
 
         let boardStore = BoardStore(
@@ -241,7 +253,8 @@ struct ContentView: View {
             settingsStore: settings,
             ghAdapter: GhCliAdapter(),
             worktreeAdapter: GitWorktreeAdapter(),
-            tmuxAdapter: tmux
+            tmuxAdapter: tmux,
+            codexRuntimeStateStore: codexRuntimeStateStore
         )
 
         // Load Pushover from settings.json, wrap in CompositeNotifier with macOS fallback
@@ -281,6 +294,14 @@ struct ContentView: View {
         self.assistantRegistry = registry
         self.launcher = launch
         self.tmuxAdapter = tmux
+        self.codexBoardCoordinator = CodexBoardCoordinator(
+            tmux: tmux,
+            stateStore: codexRuntimeStateStore
+        ) { [weak boardStore] state in
+            Task { @MainActor in
+                boardStore?.dispatch(.codexRuntimeStateChanged(state))
+            }
+        }
         self.hookEventsPath = (NSHomeDirectory() as NSString)
             .appendingPathComponent(".kanban-code/hook-events.jsonl")
         self.settingsFilePath = (NSHomeDirectory() as NSString)
@@ -320,6 +341,44 @@ struct ContentView: View {
         return (PushoverClient(token: token, userKey: user), mode)
     }
 
+    private func selectCodexBoardRuntime(_ runtime: CodexRuntimeBackend) {
+        guard runtime != .unknown, runtime != store.state.codexBoardRuntime else { return }
+        store.dispatch(.setCodexBoardRuntime(runtime))
+
+        Task {
+            do {
+                var settings = try await settingsStore.read()
+                settings.codexBoard.runtime = runtime
+                try await settingsStore.write(settings)
+            } catch {
+                store.dispatch(.setError("Could not save Codex runtime preference: \(error.localizedDescription)"))
+            }
+        }
+    }
+
+    private func openRuntimeSession(cardId: String) {
+        guard let card = store.state.cards.first(where: { $0.id == cardId }) else { return }
+        switchToProjectIfNeeded(for: card)
+
+        switch CodexSessionNavigation.destination(
+            executionBinding: card.link.executionBinding,
+            legacyTmuxSessionName: card.link.tmuxLink?.sessionName
+        ) {
+        case .codexThread(let url):
+            if !NSWorkspace.shared.open(url) {
+                store.dispatch(.selectCard(cardId: cardId))
+                store.dispatch(.setError("Codex could not open this thread. The card details remain available here."))
+            }
+        case .tmux(let sessionName):
+            store.dispatch(.selectCard(cardId: cardId))
+            detailTab = .terminal
+            pendingTerminalSession = sessionName
+            shouldFocusTerminal = true
+        case .details:
+            store.dispatch(.selectCard(cardId: cardId))
+        }
+    }
+
     private func updateRegisteredAssistants(_ enabled: [CodingAssistant]) {
         for assistant in CodingAssistant.allCases {
             if enabled.contains(assistant) {
@@ -331,7 +390,7 @@ struct ContentView: View {
                     case .gemini:
                         assistantRegistry.register(.gemini, discovery: GeminiSessionDiscovery(), detector: GeminiActivityDetector(), store: GeminiSessionStore())
                     case .codex:
-                        assistantRegistry.register(.codex, discovery: CodexSessionDiscovery(), detector: CodexActivityDetector(), store: CodexSessionStore())
+                        assistantRegistry.register(.codex, discovery: CodexHybridSessionDiscovery(), detector: CodexActivityDetector(), store: CodexSessionStore())
                     }
                 }
             } else {
@@ -418,6 +477,7 @@ struct ContentView: View {
                     shouldFocusTerminal = true
                 }
             },
+            onOpenRuntimeSession: { cardId in openRuntimeSession(cardId: cardId) },
             onColumnBackgroundClick: { column in
                 handleColumnBackgroundClick(column)
             }
@@ -504,6 +564,7 @@ struct ContentView: View {
                     shouldFocusTerminal = true
                 }
             },
+            onOpenRuntimeSession: { cardId in openRuntimeSession(cardId: cardId) },
             onRenameCard: { cardId, name in
                 store.dispatch(.renameCard(cardId: cardId, name: name))
             },
@@ -768,21 +829,41 @@ struct ContentView: View {
     private var boardWithOverlays: some View {
         Group {
             if isExpandedDetail {
-                if let dm = store.state.selectedDMParticipant {
-                    dmChatContent(other: dm)
-                } else if let name = store.state.selectedChannelName,
-                          let ch = store.state.channels.first(where: { $0.name == name }) {
-                    channelChatContent(channel: ch)
-                } else if let card = store.state.selectedCard {
-                    makeCardDetailView(card: card)
-                } else {
-                    expandedEmptyState
+                VStack(spacing: 0) {
+                    AttentionStrip(
+                        items: store.state.attentionItems,
+                        onPrimaryAction: handleCodexAttention,
+                        onOpenSession: { openRuntimeSession(cardId: $0.cardId) }
+                    )
+                    if let dm = store.state.selectedDMParticipant {
+                        dmChatContent(other: dm)
+                    } else if let name = store.state.selectedChannelName,
+                              let ch = store.state.channels.first(where: { $0.name == name }) {
+                        channelChatContent(channel: ch)
+                    } else if let card = store.state.selectedCard {
+                        makeCardDetailView(card: card)
+                    } else {
+                        expandedEmptyState
+                    }
                 }
             } else {
                 // Normal: kanban board with inspector.
                 // When a channel/DM is selected the inspector shows chat instead of card detail.
-                boardView
-                    .ignoresSafeArea(edges: .top)
+                VStack(spacing: 0) {
+                    CodexBoardHeader(
+                        runtime: store.state.codexBoardRuntime,
+                        boardCount: store.state.codexBoardCards.count,
+                        allSessionsCount: store.state.cards.count,
+                        onSelectRuntime: selectCodexBoardRuntime,
+                        onShowAllSessions: { showAllSessions = true }
+                    )
+                    AttentionStrip(
+                        items: store.state.attentionItems,
+                        onPrimaryAction: handleCodexAttention,
+                        onOpenSession: { openRuntimeSession(cardId: $0.cardId) }
+                    )
+                    boardView
+                }
                     .inspector(isPresented: showInspector) {
                         inspectorContent
                             .inspectorColumnWidth(min: 600, ideal: 800, max: 1000)
@@ -887,11 +968,12 @@ struct ContentView: View {
                     defaultProjectPath: store.state.selectedProjectPath,
                     globalRemoteSettings: store.state.globalRemoteSettings,
                     enabledAssistants: assistantRegistry.available,
+                    codexRuntime: store.state.codexBoardRuntime,
                     onCreate: { prompt, projectPath, title, startImmediately, images in
-                        createManualTask(prompt: prompt, projectPath: projectPath, title: title, startImmediately: startImmediately, images: images)
+                        createCodexBoardTask(prompt: prompt, projectPath: projectPath, title: title, images: images)
                     },
                     onCreateAndLaunch: { prompt, projectPath, title, createWorktree, runRemotely, skipPermissions, commandOverride, images, assistant, apiServiceId in
-                        createManualTaskAndLaunch(prompt: prompt, projectPath: projectPath, title: title, createWorktree: createWorktree, runRemotely: runRemotely, skipPermissions: skipPermissions, commandOverride: commandOverride, images: images, assistant: assistant, apiServiceId: apiServiceId)
+                        createCodexBoardTask(prompt: prompt, projectPath: projectPath, title: title, images: images)
                     }
                 )
             }
@@ -945,6 +1027,20 @@ struct ContentView: View {
                     }
                 }
             }
+            .sheet(item: $codexReviewTarget) { target in
+                CodexReviewFeedbackDialog(
+                    title: target.title,
+                    onCancel: { codexReviewTarget = nil },
+                    onSubmit: { feedback in continueCodexReview(cardId: target.cardId, feedback: feedback) }
+                )
+            }
+            .sheet(item: $codexPendingAction) { action in
+                CodexPendingActionDialog(
+                    action: action,
+                    onCancel: { codexPendingAction = nil },
+                    onRespond: { approve, input in respondToCodex(action: action, approve: approve, input: input) }
+                )
+            }
             .sheet(isPresented: $showOnboarding) {
                 OnboardingWizard(
                     settingsStore: settingsStore,
@@ -977,6 +1073,16 @@ struct ContentView: View {
                         pendingTerminalSession = terminalSession
                         shouldFocusTerminal = true
                     }
+                )
+            }
+            .sheet(isPresented: $showAllSessions) {
+                AllSessionsView(
+                    cards: store.state.cards,
+                    onOpen: { cardId in
+                        showAllSessions = false
+                        openRuntimeSession(cardId: cardId)
+                    },
+                    onDismiss: { showAllSessions = false }
                 )
             }
             .popover(isPresented: Binding(
@@ -1239,6 +1345,13 @@ struct ContentView: View {
                     guard !Task.isCancelled else { break }
                     await store.reconcile()
                     systemTray.update()
+                }
+            }
+            .task(id: "codex-board-scheduler") {
+                while !Task.isCancelled {
+                    await scheduleQueuedCodexTasks()
+                    await codexBoardCoordinator.drainLifecycleInbox()
+                    try? await Task.sleep(for: .seconds(2))
                 }
             }
             .task(id: "channels-bootstrap") {
@@ -1814,6 +1927,10 @@ struct ContentView: View {
                 showProcessManager = true
             }
 
+            Button("All Sessions...") {
+                showAllSessions = true
+            }
+
             SettingsLink {
                 Text("Settings...")
             }
@@ -2094,6 +2211,58 @@ struct ContentView: View {
         }
     }
 
+    private func handleCodexAttention(_ item: AttentionItem) {
+        Task {
+            if let action = await codexBoardCoordinator.pendingAction(for: item.cardId) {
+                await MainActor.run { codexPendingAction = action }
+            } else {
+                await MainActor.run { openRuntimeSession(cardId: item.cardId) }
+            }
+        }
+    }
+
+    private func respondToCodex(action: CodexPendingAction, approve: Bool?, input: String?) {
+        Task {
+            do {
+                try await codexBoardCoordinator.respond(to: action.cardId, approve: approve, input: input)
+                await MainActor.run { codexPendingAction = nil }
+            } catch {
+                await MainActor.run { store.dispatch(.setError(error.localizedDescription)) }
+            }
+        }
+    }
+
+    private func acceptCodexReview(cardId: String) {
+        Task {
+            do {
+                try await codexBoardCoordinator.acceptReview(cardId: cardId)
+            } catch {
+                await MainActor.run { store.dispatch(.setError(error.localizedDescription)) }
+            }
+        }
+    }
+
+    private func continueCodexReview(cardId: String, feedback: String) {
+        Task {
+            do {
+                try await codexBoardCoordinator.continueReview(cardId: cardId, feedback: feedback)
+                await MainActor.run { codexReviewTarget = nil }
+            } catch {
+                await MainActor.run { store.dispatch(.setError(error.localizedDescription)) }
+            }
+        }
+    }
+
+    private func markCodexReviewReady(cardId: String) {
+        Task {
+            do {
+                try await codexBoardCoordinator.markReviewReady(cardId: cardId)
+            } catch {
+                await MainActor.run { store.dispatch(.setError(error.localizedDescription)) }
+            }
+        }
+    }
+
     // MARK: - Expanded Actions Menu
 
     private func expandedActionsMenu(for card: KanbanCodeCard) -> some View {
@@ -2143,6 +2312,12 @@ struct ContentView: View {
                     onMoveToFolder: { selectFolderForMove(cardId: card.id) },
                     onMigrateAssistant: { target in
                         presentDialog(.confirmMigration(cardId: card.id, targetAssistant: target))
+                    },
+                    onOpenRuntimeSession: { openRuntimeSession(cardId: card.id) },
+                    onMarkReviewReady: { markCodexReviewReady(cardId: card.id) },
+                    onAcceptReview: { acceptCodexReview(cardId: card.id) },
+                    onContinueReview: {
+                        codexReviewTarget = CodexReviewTarget(cardId: card.id, title: card.displayTitle)
                     }
                 ),
                 showBranchInfo: true,
@@ -2497,6 +2672,112 @@ struct ContentView: View {
 
         if startImmediately {
             startCard(cardId: link.id)
+        }
+    }
+
+    private func createCodexBoardTask(
+        prompt: String,
+        projectPath: String?,
+        title: String? = nil,
+        images: [ImageAttachment] = []
+    ) {
+        let trimmed = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
+        let firstLine = trimmed.components(separatedBy: .newlines).first ?? trimmed
+        let name = String((title?.isEmpty == false ? title! : firstLine).prefix(100))
+        let imagePaths: [String]? = images.isEmpty ? nil : images.compactMap { image in
+            var mutable = image
+            return try? mutable.saveToPersistent()
+        }
+        let backend = store.state.codexBoardRuntime
+        var link = Link(
+            name: name,
+            projectPath: projectPath,
+            column: .backlog,
+            source: .manual,
+            promptBody: trimmed,
+            promptImagePaths: imagePaths,
+            assistant: .codex
+        )
+        link.executionBinding = CodexExecutionBinding(
+            backend: backend,
+            ownership: .managed,
+            evidence: .boardCreated,
+            telemetryQuality: .unknown,
+            boundAt: .now
+        )
+        store.dispatch(.createManualTask(link))
+
+        Task {
+            do {
+                let settings = try await settingsStore.read()
+                let task = CodexQueuedTask(
+                    cardId: link.id,
+                    backend: backend,
+                    enqueuedAt: link.createdAt,
+                    projectPath: projectPath ?? NSHomeDirectory(),
+                    prompt: trimmed
+                )
+                let result = try await codexBoardCoordinator.schedule(
+                    tasks: [task],
+                    activeBackend: backend,
+                    maxConcurrency: settings.codexBoard.maxConcurrency
+                )
+                for state in result.runtimeStates.values {
+                    store.dispatch(.codexRuntimeStateChanged(state))
+                }
+                for outcome in result.outcomes {
+                    switch outcome {
+                    case .launched(let cardId, let binding):
+                        store.dispatch(.bindCodexRuntime(cardId: cardId, binding: binding))
+                    case .failed(_, let message), .uncertain(_, let message):
+                        store.dispatch(.setError(message))
+                    }
+                }
+            } catch {
+                store.dispatch(.setError("Could not start Codex task: \(error.localizedDescription)"))
+            }
+        }
+    }
+
+    private func scheduleQueuedCodexTasks() async {
+        let backend = store.state.codexBoardRuntime
+        let queued = store.state.links.values.compactMap { link -> CodexQueuedTask? in
+            let phase = store.state.codexRuntimeStates[link.id]?.lifecycle.phase
+            guard link.effectiveAssistant == .codex,
+                  link.executionBinding?.backend == backend,
+                  link.executionBinding?.ownership == .managed,
+                  link.executionBinding?.threadId == nil,
+                  link.executionBinding?.tmuxSessionName == nil,
+                  phase == nil || phase == .queued else {
+                return nil
+            }
+            return CodexQueuedTask(
+                cardId: link.id,
+                backend: backend,
+                enqueuedAt: link.createdAt,
+                projectPath: link.projectPath ?? NSHomeDirectory(),
+                prompt: link.promptBody ?? link.name ?? "Codex task"
+            )
+        }
+        guard !queued.isEmpty else { return }
+        do {
+            let settings = try await settingsStore.read()
+            let result = try await codexBoardCoordinator.schedule(
+                tasks: queued,
+                activeBackend: backend,
+                maxConcurrency: settings.codexBoard.maxConcurrency
+            )
+            for state in result.runtimeStates.values {
+                store.dispatch(.codexRuntimeStateChanged(state))
+            }
+            for outcome in result.outcomes {
+                if case .launched(let cardId, let binding) = outcome {
+                    store.dispatch(.bindCodexRuntime(cardId: cardId, binding: binding))
+                }
+            }
+        } catch {
+            // Dependency diagnostics in Settings remain the durable user-facing
+            // explanation. Keep queued work intact for a later scheduling pass.
         }
     }
 

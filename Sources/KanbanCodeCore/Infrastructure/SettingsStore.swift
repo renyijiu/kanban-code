@@ -20,6 +20,8 @@ public struct Settings: Codable, Sendable {
     public var defaultAPIServiceIds: [String: String]
     /// Automatic context-limit guard for Claude sessions.
     public var selfCompact: SelfCompactSettings
+    /// Global Codex board runtime and scheduler capacity.
+    public var codexBoard: CodexBoardSettings
 
     public init(
         projects: [Project] = [],
@@ -36,7 +38,8 @@ public struct Settings: Codable, Sendable {
         enabledAssistants: [CodingAssistant] = CodingAssistant.allCases,
         apiServices: [APIService] = [],
         defaultAPIServiceIds: [String: String] = [:],
-        selfCompact: SelfCompactSettings = SelfCompactSettings()
+        selfCompact: SelfCompactSettings = SelfCompactSettings(),
+        codexBoard: CodexBoardSettings = CodexBoardSettings()
     ) {
         self.projects = projects
         self.globalView = globalView
@@ -53,6 +56,7 @@ public struct Settings: Codable, Sendable {
         self.apiServices = apiServices
         self.defaultAPIServiceIds = defaultAPIServiceIds
         self.selfCompact = selfCompact
+        self.codexBoard = codexBoard
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -60,7 +64,7 @@ public struct Settings: Codable, Sendable {
         case promptTemplate, githubIssuePromptTemplate, columnOrder, hasCompletedOnboarding, defaultAssistant
         case enabledAssistants
         case apiServices, defaultAPIServiceIds
-        case selfCompact
+        case selfCompact, codexBoard
         case skill // backward-compat: old name for promptTemplate
     }
 
@@ -100,6 +104,7 @@ public struct Settings: Codable, Sendable {
         apiServices = (try? container.decodeIfPresent([APIService].self, forKey: .apiServices)) ?? []
         defaultAPIServiceIds = (try? container.decodeIfPresent([String: String].self, forKey: .defaultAPIServiceIds)) ?? [:]
         selfCompact = (try? container.decodeIfPresent(SelfCompactSettings.self, forKey: .selfCompact)) ?? SelfCompactSettings()
+        codexBoard = (try? container.decodeIfPresent(CodexBoardSettings.self, forKey: .codexBoard)) ?? CodexBoardSettings()
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -119,7 +124,46 @@ public struct Settings: Codable, Sendable {
         try container.encode(apiServices, forKey: .apiServices)
         try container.encode(defaultAPIServiceIds, forKey: .defaultAPIServiceIds)
         try container.encode(selfCompact, forKey: .selfCompact)
+        try container.encode(codexBoard, forKey: .codexBoard)
         // Note: "skill" is NOT encoded — only read for backward-compat
+    }
+}
+
+public struct CodexBoardSettings: Codable, Sendable, Equatable {
+    public static let concurrencyRange = 1 ... 32
+
+    public var runtime: CodexRuntimeBackend
+    private var storedMaxConcurrency: Int
+
+    public var maxConcurrency: Int {
+        get { storedMaxConcurrency }
+        set { storedMaxConcurrency = Self.clampedConcurrency(newValue) }
+    }
+
+    public init(runtime: CodexRuntimeBackend = .cliTmux, maxConcurrency: Int = 3) {
+        self.runtime = runtime
+        storedMaxConcurrency = Self.clampedConcurrency(maxConcurrency)
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case runtime, maxConcurrency
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        runtime = (try? container.decodeIfPresent(CodexRuntimeBackend.self, forKey: .runtime)) ?? .cliTmux
+        let concurrency = (try? container.decodeIfPresent(Int.self, forKey: .maxConcurrency)) ?? 3
+        storedMaxConcurrency = Self.clampedConcurrency(concurrency)
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(runtime, forKey: .runtime)
+        try container.encode(maxConcurrency, forKey: .maxConcurrency)
+    }
+
+    public static func clampedConcurrency(_ value: Int) -> Int {
+        min(max(value, concurrencyRange.lowerBound), concurrencyRange.upperBound)
     }
 }
 

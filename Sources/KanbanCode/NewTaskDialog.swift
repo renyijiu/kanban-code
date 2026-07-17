@@ -7,6 +7,7 @@ struct NewTaskDialog: View {
     var defaultProjectPath: String?
     var globalRemoteSettings: RemoteSettings?
     var enabledAssistants: [CodingAssistant] = CodingAssistant.allCases
+    var codexRuntime: CodexRuntimeBackend?
     /// (prompt, projectPath, title, startImmediately, images) — creates task without an assistant set
     var onCreate: (String, String?, String?, Bool, [ImageAttachment]) -> Void = { _, _, _, _, _ in }
     /// (prompt, projectPath, title, createWorktree, runRemotely, skipPermissions, commandOverride, images, assistant, apiServiceId) — creates and launches directly (skips LaunchConfirmation)
@@ -78,8 +79,22 @@ struct NewTaskDialog: View {
                 }
             }
 
+            if let codexRuntime {
+                HStack(spacing: 8) {
+                    Image(systemName: codexRuntime.boardSymbol)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Codex · \(codexRuntime.boardLabel)")
+                            .font(.app(.callout, weight: .semibold))
+                        Text("The task will be queued and claimed automatically.")
+                            .font(.app(.caption))
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                .padding(10)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(.quaternary.opacity(0.45), in: RoundedRectangle(cornerRadius: 8))
             // Assistant picker (when multiple enabled)
-            if startImmediately && enabledAssistants.count > 1 {
+            } else if startImmediately && enabledAssistants.count > 1 {
                 Picker("Assistant", selection: $selectedAssistantRaw) {
                     ForEach(enabledAssistants, id: \.self) { assistant in
                         Text(assistant.displayName).tag(assistant.rawValue)
@@ -105,11 +120,13 @@ struct NewTaskDialog: View {
             }
 
             // Start immediately toggle
-            Toggle("Start immediately", isOn: $startImmediately)
-                .font(.app(.callout))
+            if codexRuntime == nil {
+                Toggle("Start immediately", isOn: $startImmediately)
+                    .font(.app(.callout))
+            }
 
             // Launch options (shown when "Start immediately" is checked)
-            if startImmediately {
+            if startImmediately && codexRuntime == nil {
                 VStack(alignment: .leading, spacing: 6) {
                     Toggle("Create worktree", isOn: (isGitRepo && selectedAssistant.supportsWorktree) ? $createWorktree : .constant(false))
                         .font(.app(.callout))
@@ -182,7 +199,7 @@ struct NewTaskDialog: View {
                 }
                 .keyboardShortcut(.cancelAction)
 
-                Button(startImmediately ? "Create & Start" : "Create", action: submitForm)
+                Button(codexRuntime != nil || startImmediately ? "Create & Start" : "Create", action: submitForm)
                 .keyboardShortcut(.defaultAction)
                 .disabled(prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                 .buttonStyle(.borderedProminent)
@@ -191,6 +208,10 @@ struct NewTaskDialog: View {
         .padding(20)
         .frame(width: 450)
         .onAppear {
+            if codexRuntime != nil {
+                selectedAssistant = .codex
+                startImmediately = true
+            }
             if let defaultPath = defaultProjectPath,
                projects.contains(where: { $0.path == defaultPath }) {
                 selectedProjectPath = defaultPath
@@ -271,7 +292,7 @@ struct NewTaskDialog: View {
         let proj = resolvedProjectPath
         let titleOrNil = title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : title.trimmingCharacters(in: .whitespacesAndNewlines)
         if let proj { lastSelectedProjectPath = proj }
-        if startImmediately {
+        if codexRuntime != nil || startImmediately {
             onCreateAndLaunch(
                 prompt,
                 proj,
@@ -281,7 +302,7 @@ struct NewTaskDialog: View {
                 dangerouslySkipPermissions,
                 commandEdited ? command : nil,
                 images,
-                selectedAssistant,
+                codexRuntime == nil ? selectedAssistant : .codex,
                 selectedServiceId
             )
         } else {

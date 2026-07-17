@@ -299,6 +299,13 @@ export interface APIService {
  *  lowercase variant name). */
 export type CardRuntime = "windows" | "wsl";
 
+export type CodexRuntimeBackend = "app" | "cliTmux" | "unknown";
+
+export interface CodexBoardSettings {
+  runtime: CodexRuntimeBackend;
+  maxConcurrency: number;
+}
+
 export interface Settings {
   projects: Project[];
   globalView: GlobalViewSettings;
@@ -320,6 +327,8 @@ export interface Settings {
   apiServices?: APIService[];
   /** Per-assistant default APIService id (assistant id → service id). */
   defaultAPIServiceIds?: Record<string, string>;
+  /** Codex board runtime selection and global launch capacity. */
+  codexBoard?: CodexBoardSettings;
 }
 
 /** Mirrors macOS APIService.needsSeparator — a `--` separator before the

@@ -56,8 +56,8 @@ struct CardLifecycleTests {
         #expect(link.column == .inReview)
     }
 
-    @Test("All PRs merged/closed → done")
-    func allPRsDone() {
+    @Test("A closed but unmerged PR keeps the card in review")
+    func closedUnmergedIsNotDone() {
         var link = Link(
             column: .inReview,
             sessionLink: SessionLink(sessionId: "s1"),
@@ -67,7 +67,7 @@ struct CardLifecycleTests {
             ]
         )
         UpdateCardColumn.update(link: &link, activityState: .ended, hasWorktree: false)
-        #expect(link.column == .done)
+        #expect(link.column == .inReview)
     }
 
     @Test("Actively working overrides manual column to inProgress")

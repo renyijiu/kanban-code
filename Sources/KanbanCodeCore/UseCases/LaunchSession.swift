@@ -44,7 +44,7 @@ public final class LaunchSession: SessionLauncher, @unchecked Sendable {
         }
 
         // Prepend cd to ensure we're in the right directory even if zshrc changes it
-        var fullCmd = "cd \(shellEscape(projectPath))"
+        var fullCmd = "cd \(ShellCommand.shellEscape(projectPath))"
         if let preamble, !preamble.isEmpty {
             fullCmd += " && \(preamble)"
         }
@@ -94,7 +94,7 @@ public final class LaunchSession: SessionLauncher, @unchecked Sendable {
         }
 
         // Prepend cd to ensure we're in the right directory even if zshrc changes it
-        var fullCmd = "cd \(shellEscape(projectPath))"
+        var fullCmd = "cd \(ShellCommand.shellEscape(projectPath))"
         if let preamble, !preamble.isEmpty {
             fullCmd += " && \(preamble)"
         }
@@ -122,7 +122,7 @@ public final class LaunchSession: SessionLauncher, @unchecked Sendable {
                     let escaped = value.replacingOccurrences(of: "\"", with: "\\\"")
                     parts.append("\(key)=\"\(escaped)\"")
                 } else {
-                    parts.append("\(key)=\(shellEscape(value))")
+                    parts.append("\(key)=\(ShellCommand.shellEscape(value))")
                 }
             }
         }
@@ -138,7 +138,4 @@ public final class LaunchSession: SessionLauncher, @unchecked Sendable {
         return projectName
     }
 
-    private func shellEscape(_ str: String) -> String {
-        "'" + str.replacingOccurrences(of: "'", with: "'\\''") + "'"
-    }
 }

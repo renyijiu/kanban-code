@@ -8,8 +8,9 @@ The fix: a lightweight Elm/Redux-style store that serializes all state mutations
 
 ## Core Components
 
-### `AppState` (struct)
-Single source of truth. All board data lives here.
+### `AppState` (`@Observable`)
+Single UI source of truth. Durable Codex leases and lifecycle snapshots are
+owned by a separate actor-backed store and projected into `AppState`.
 
 ```
 AppState
@@ -17,6 +18,7 @@ AppState
 ├── sessions: [String: Session]        // sessionId → Session
 ├── activityMap: [String: ActivityState] // sessionId → activity
 ├── tmuxSessions: Set<String>          // live tmux session names
+├── codexRuntimeStates: [String: CardRuntimeState] // UI projection cache
 ├── selectedCardId: String?
 ├── selectedProjectPath: String?
 ├── configuredProjects: [Project]
@@ -46,6 +48,7 @@ Side effects declared by the reducer, executed asynchronously by `EffectHandler`
 - `createTmuxSession`, `killTmuxSession` — terminal management
 - `deleteSessionFile`, `cleanupTerminalCache` — cleanup
 - `updateSessionIndex` — session metadata
+- `upsertCodexRuntimeState`, `rekeyCodexRuntimeState` — Codex sidecar state
 
 ### `BoardStore` (`@Observable @MainActor`)
 The main store that ties it all together:
@@ -60,6 +63,25 @@ func dispatch(_ action: Action) {
 ```
 
 Also has `reconcile()` — async method that does full discovery (sessions, tmux, worktrees, PRs) and dispatches `.reconciled(result)`.
+
+## Codex runtime ownership
+
+Codex has two backends—App Server and CLI + tmux—but both feed one canonical
+lifecycle. `CodexRuntimeStateStore` is the durable authority for launch leases,
+execution bindings, lifecycle watermarks and recovery. Its file is separate
+from `links.json` because older TypeScript and Rust clients rewrite that shared
+file and cannot safely own high-consistency state.
+
+`CodexBoardCoordinator` owns live runtime adapters, serialized FIFO scheduling,
+App Server notification/request streams and the authenticated hook inbox. It
+persists lifecycle changes before notifying SwiftUI. `AppState.codexRuntimeStates`
+is only the render/projection cache used to derive the five lanes and global
+attention strip.
+
+Imported App threads receive structured status during reconciliation. Managed
+tasks persist a launch lease before any external side effect. Card merges emit a
+`rekeyCodexRuntimeState` effect so a binding or lease cannot be orphaned under a
+deleted card ID.
 
 ## Key Files
 
@@ -126,7 +148,7 @@ This is NOT TCA (Point-Free's The Composable Architecture). Key differences:
 | Effect cancellation | Simple Tasks | Sophisticated effect lifecycle |
 | Navigation state | `@State` in views | Managed in reducer |
 | Package dependency | None | `swift-composable-architecture` |
-| Code size | ~400 lines | Framework |
+| Code size | Project-local implementation | Framework |
 
 For our use case (single-screen app, ~25 actions, core problem = race conditions), the lightweight approach gives the same guarantees without the learning curve.
 

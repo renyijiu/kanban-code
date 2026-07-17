@@ -22,6 +22,8 @@ import {
   findCard,
   toCardSummary,
   toCardDetail,
+  applyCodexRuntimeProjection,
+  readCodexRuntimeStates,
 } from "./data.js";
 import {
   formatCardList,
@@ -131,7 +133,8 @@ program
   .option("--with-capture-peek", "Include a short peek at each card's tmux pane")
   .option("-j, --json", "Output as JSON")
   .action((opts) => {
-    let links = readLinks();
+    const runtimeStates = readCodexRuntimeStates();
+    let links = applyCodexRuntimeProjection(readLinks(), runtimeStates);
     const tmux = listTmuxSessions();
     const liveTmux = new Set(tmux.map((t) => t.name));
 
@@ -165,7 +168,7 @@ program
     });
 
     const summaries = links.map((l) => {
-      const s = toCardSummary(l, liveTmux);
+      const s = toCardSummary(l, liveTmux, runtimeStates);
       if (opts.withLastMessage && l.sessionLink?.sessionPath) {
         const turns = readLastTranscriptTurns(l.sessionLink.sessionPath, 1);
         if (turns.length) s.lastMessage = turns[turns.length - 1].text;
@@ -197,7 +200,8 @@ program
   .option("-t, --transcript <n>", "Number of transcript turns to show", "5")
   .option("-j, --json", "Output as JSON")
   .action((cardQuery: string, opts) => {
-    const links = readLinks();
+    const runtimeStates = readCodexRuntimeStates();
+    const links = applyCodexRuntimeProjection(readLinks(), runtimeStates);
     const card = findCard(links, cardQuery);
     if (!card) {
       console.error(`Card not found: ${cardQuery}`);
@@ -206,7 +210,7 @@ program
 
     const tmux = listTmuxSessions();
     const liveTmux = new Set(tmux.map((t) => t.name));
-    const detail = toCardDetail(card, liveTmux, parseInt(opts.transcript));
+    const detail = toCardDetail(card, liveTmux, parseInt(opts.transcript), runtimeStates);
 
     if (opts.json) {
       output(detail, { json: true });

@@ -11,6 +11,7 @@ public actor EffectHandler {
     private let setClipboardImage: (@Sendable (Data) -> Void)?
     private let channelsStore: ChannelsStore
     private let notifier: NotifierPort?
+    private let codexRuntimeStateStore: CodexRuntimeStateStore?
 
     // MARK: - Chat notification burst throttler
     //
@@ -35,13 +36,15 @@ public actor EffectHandler {
         tmuxAdapter: TmuxManagerPort? = nil,
         setClipboardImage: (@Sendable (Data) -> Void)? = nil,
         channelsStore: ChannelsStore? = nil,
-        notifier: NotifierPort? = nil
+        notifier: NotifierPort? = nil,
+        codexRuntimeStateStore: CodexRuntimeStateStore? = nil
     ) {
         self.coordinationStore = coordinationStore
         self.tmuxAdapter = tmuxAdapter
         self.setClipboardImage = setClipboardImage
         self.channelsStore = channelsStore ?? ChannelsStore()
         self.notifier = notifier
+        self.codexRuntimeStateStore = codexRuntimeStateStore
     }
 
     public func execute(_ effect: Effect, dispatch: @MainActor @Sendable (Action) -> Void) async {
@@ -168,6 +171,23 @@ public actor EffectHandler {
         case .deleteFiles(let paths):
             for path in paths {
                 try? FileManager.default.removeItem(atPath: path)
+            }
+
+        case .rekeyCodexRuntimeState(let sourceCardId, let targetCardId):
+            do {
+                try await codexRuntimeStateStore?.rekey(
+                    sourceCardId: sourceCardId,
+                    targetCardId: targetCardId
+                )
+            } catch {
+                await dispatch(.setError("Could not merge Codex runtime state: \(error.localizedDescription)"))
+            }
+
+        case .upsertCodexRuntimeState(let state):
+            do {
+                try await codexRuntimeStateStore?.upsert(state)
+            } catch {
+                await dispatch(.setError("Could not persist Codex runtime state: \(error.localizedDescription)"))
             }
 
         case .loadChannels:

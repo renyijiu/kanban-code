@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value};
 use std::path::PathBuf;
 use tokio::fs;
 
@@ -196,6 +197,11 @@ pub struct Link {
     /// asks once.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub card_runtime: Option<CardRuntime>,
+    /// Fields introduced by another Kanban Code client that this build does
+    /// not understand yet. Keeping them flattened prevents a Windows
+    /// rename/move/upsert from erasing newer macOS card metadata.
+    #[serde(default, flatten)]
+    pub extra_fields: Map<String, Value>,
 }
 
 fn default_assistant() -> String {
@@ -283,6 +289,7 @@ impl Link {
             api_service_id: None,
             browser_tabs: None,
             card_runtime: None,
+            extra_fields: Map::new(),
         }
     }
 
@@ -397,7 +404,14 @@ impl CoordinationStore {
     pub async fn upsert_link(&self, link: &Link) -> Result<()> {
         let mut links = self.read_links().await?;
         if let Some(idx) = links.iter().position(|l| l.id == link.id) {
-            links[idx] = link.clone();
+            let mut replacement = link.clone();
+            for (key, value) in &links[idx].extra_fields {
+                replacement
+                    .extra_fields
+                    .entry(key.clone())
+                    .or_insert_with(|| value.clone());
+            }
+            links[idx] = replacement;
         } else {
             links.push(link.clone());
         }
@@ -581,6 +595,7 @@ impl CoordinationStore {
             api_service_id: None,
             browser_tabs: None,
             card_runtime: None,
+            extra_fields: Map::new(),
         };
         self.upsert_link(&link).await?;
         Ok(link)
@@ -1103,9 +1118,86 @@ mod tests {
             api_service_id: None,
             browser_tabs: None,
             card_runtime: None,
+            extra_fields: Map::new(),
         };
         let json = serde_json::to_string(&link).unwrap();
         assert!(!json.contains("browserTabs"), "absent tab list must not write the key");
         assert!(!json.contains("cardRuntime"), "unpicked runtime must not write the key");
+    }
+
+    async fn inject_unknown_mac_fields(base: &std::path::Path, card_id: &str) {
+        let path = base.join("links.json");
+        let data = std::fs::read(&path).unwrap();
+        let mut root: Value = serde_json::from_slice(&data).unwrap();
+        let card = root["links"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|card| card["id"] == card_id)
+            .unwrap();
+        let object = card.as_object_mut().unwrap();
+        object.insert(
+            "executionBinding".into(),
+            serde_json::json!({
+                "backend": "app",
+                "ownership": "managed",
+                "evidence": "boardCreated",
+                "telemetryQuality": "precise",
+                "threadId": "thread_123"
+            }),
+        );
+        object.insert(
+            "futureMacField".into(),
+            serde_json::json!({"nested": [1, {"kept": true}]}),
+        );
+        std::fs::write(&path, serde_json::to_vec_pretty(&root).unwrap()).unwrap();
+    }
+
+    fn assert_unknown_mac_fields(link: &Link) {
+        assert_eq!(
+            link.extra_fields["executionBinding"]["threadId"],
+            "thread_123"
+        );
+        assert_eq!(link.extra_fields["futureMacField"]["nested"][1]["kept"], true);
+    }
+
+    #[tokio::test]
+    async fn unknown_mac_fields_survive_rename_and_move() {
+        let base = tmp_base();
+        let store = CoordinationStore::new(Some(base.clone()));
+        let card = mk_card(&store, Some("before")).await;
+        inject_unknown_mac_fields(&base, &card.id).await;
+
+        store.rename_link(&card.id, "after").await.unwrap();
+        store.move_card(&card.id, "in_progress").await.unwrap();
+
+        let links = store.read_links().await.unwrap();
+        let stored = links.iter().find(|link| link.id == card.id).unwrap();
+        assert_eq!(stored.name.as_deref(), Some("after"));
+        assert_eq!(stored.column, "in_progress");
+        assert_unknown_mac_fields(stored);
+
+        let raw = std::fs::read_to_string(base.join("links.json")).unwrap();
+        assert!(!raw.contains("extraFields"), "unknown keys must remain flattened");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[tokio::test]
+    async fn upsert_preserves_unknown_mac_fields_missing_from_replacement() {
+        let base = tmp_base();
+        let store = CoordinationStore::new(Some(base.clone()));
+        let card = mk_card(&store, Some("before")).await;
+        inject_unknown_mac_fields(&base, &card.id).await;
+
+        let mut replacement = store.read_links().await.unwrap().remove(0);
+        replacement.name = Some("replacement".into());
+        replacement.extra_fields.clear();
+        store.upsert_link(&replacement).await.unwrap();
+
+        let links = store.read_links().await.unwrap();
+        let stored = links.iter().find(|link| link.id == card.id).unwrap();
+        assert_eq!(stored.name.as_deref(), Some("replacement"));
+        assert_unknown_mac_fields(stored);
+        let _ = std::fs::remove_dir_all(&base);
     }
 }

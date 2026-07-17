@@ -179,6 +179,8 @@ public struct Link: Identifiable, Codable, Sendable, Equatable {
 
     // Typed links — each independently optional
     public var sessionLink: SessionLink?
+    /// Stable Codex runtime identity and provenance. nil for legacy and non-Codex cards.
+    public var executionBinding: CodexExecutionBinding?
     public var tmuxLink: TmuxLink?
     public var worktreeLink: WorktreeLink?
     public var prLinks: [PRLink]
@@ -248,8 +250,9 @@ public struct Link: Identifiable, Codable, Sendable, Equatable {
     }
     /// Worst PR status across all PRs (highest urgency).
     public var worstPRStatus: PRStatus? { prLinks.compactMap(\.status).min() }
-    /// True if ALL PRs are merged or closed.
-    public var allPRsDone: Bool { !prLinks.isEmpty && prLinks.allSatisfy { $0.status == .merged || $0.status == .closed } }
+    /// True only when every relevant PR is merged. A closed-but-unmerged PR is
+    /// not evidence that the task shipped and must never auto-complete a card.
+    public var allPRsDone: Bool { !prLinks.isEmpty && prLinks.allSatisfy { $0.status == .merged } }
 
     // MARK: - Backward-compat computed properties
 
@@ -320,6 +323,7 @@ public struct Link: Identifiable, Codable, Sendable, Equatable {
         promptBody: String? = nil,
         promptImagePaths: [String]? = nil,
         sessionLink: SessionLink? = nil,
+        executionBinding: CodexExecutionBinding? = nil,
         tmuxLink: TmuxLink? = nil,
         worktreeLink: WorktreeLink? = nil,
         prLinks: [PRLink] = [],
@@ -349,6 +353,7 @@ public struct Link: Identifiable, Codable, Sendable, Equatable {
         self.promptBody = promptBody
         self.promptImagePaths = promptImagePaths
         self.sessionLink = sessionLink
+        self.executionBinding = executionBinding
         self.tmuxLink = tmuxLink
         self.worktreeLink = worktreeLink
         self.prLinks = prLinks
@@ -373,7 +378,7 @@ public struct Link: Identifiable, Codable, Sendable, Equatable {
         case manualOverrides, manuallyArchived, source, promptBody, promptImagePaths, isRemote, isLaunching, sortOrder, pinnedAt, pinnedSortOrder
         case discoveredBranches, discoveredRepos, assistant, apiServiceId
         // Typed links (new nested format)
-        case sessionLink, tmuxLink, worktreeLink, prLinks, issueLink, queuedPrompts, browserTabs
+        case sessionLink, executionBinding, tmuxLink, worktreeLink, prLinks, issueLink, queuedPrompts, browserTabs
         // Old format keys (for reading legacy format)
         case prLink
         case sessionId, sessionPath, worktreePath, worktreeBranch
@@ -415,6 +420,7 @@ public struct Link: Identifiable, Codable, Sendable, Equatable {
             let sn = try c.decodeIfPresent(Int.self, forKey: .sessionNumber)
             sessionLink = sid.map { SessionLink(sessionId: $0, sessionPath: sp, sessionNumber: sn) }
         }
+        executionBinding = try? c.decodeIfPresent(CodexExecutionBinding.self, forKey: .executionBinding)
 
         // Tmux link
         if let tl = try c.decodeIfPresent(TmuxLink.self, forKey: .tmuxLink) {
@@ -497,6 +503,7 @@ public struct Link: Identifiable, Codable, Sendable, Equatable {
 
         // Always write new nested format
         try c.encodeIfPresent(sessionLink, forKey: .sessionLink)
+        try c.encodeIfPresent(executionBinding, forKey: .executionBinding)
         try c.encodeIfPresent(tmuxLink, forKey: .tmuxLink)
         try c.encodeIfPresent(worktreeLink, forKey: .worktreeLink)
         if !prLinks.isEmpty {

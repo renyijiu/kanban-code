@@ -27,6 +27,66 @@ export type PRStatus =
 
 export type LinkSource = "discovered" | "hook" | "manual" | "githubIssue";
 export type CodingAssistant = "claude" | "gemini" | "codex";
+export type CodexRuntimeBackend = "app" | "cliTmux" | "unknown";
+export type RuntimeOwnership = "managed" | "observed";
+export type RuntimeEvidence =
+  | "userConfirmed"
+  | "boardCreated"
+  | "tmuxBinding"
+  | "appServerSource"
+  | "cliMetadata"
+  | "unknown";
+export type TelemetryQuality = "precise" | "limited" | "unknown";
+export type CodexLifecyclePhase =
+  | "queued"
+  | "launching"
+  | "running"
+  | "waiting"
+  | "inReview"
+  | "done"
+  | "unknown";
+export type CodexLifecycleWaitReason =
+  | "input"
+  | "approval"
+  | "ordinaryStop"
+  | "fault"
+  | "disconnected"
+  | "launchUncertain"
+  | "unknown";
+
+export interface CodexRuntimeState {
+  cardId: string;
+  lifecycle: {
+    phase: CodexLifecyclePhase;
+    waitReason?: CodexLifecycleWaitReason;
+    telemetryQuality: TelemetryQuality;
+  };
+  updatedAt: string;
+}
+
+export interface CodexRuntimeProvenance {
+  backend: CodexRuntimeBackend;
+  ownership: RuntimeOwnership;
+  evidence: RuntimeEvidence;
+  telemetryQuality: TelemetryQuality;
+  observedAt?: string;
+}
+
+export interface CodexExecutionBinding {
+  backend: CodexRuntimeBackend;
+  ownership: RuntimeOwnership;
+  evidence: RuntimeEvidence;
+  telemetryQuality: TelemetryQuality;
+  threadId?: string;
+  sessionId?: string;
+  tmuxSessionName?: string;
+  boundAt?: string;
+}
+
+export interface CodexBoardSettings {
+  runtime: CodexRuntimeBackend;
+  maxConcurrency: number;
+}
 
 export interface SessionLink {
   sessionId: string;
@@ -124,6 +184,10 @@ export interface Link {
   sortOrder?: number;
   assistant?: CodingAssistant;
   isLaunching?: boolean;
+  /// Cross-platform display/binding metadata written by the Swift app.
+  /// Lifecycle snapshots and launch leases live in codex-runtime-state.json
+  /// and are intentionally not part of the CLI's writable model.
+  executionBinding?: CodexExecutionBinding;
 }
 
 export interface TmuxSession {
@@ -154,6 +218,7 @@ export interface Settings {
   hasCompletedOnboarding?: boolean;
   defaultAssistant?: CodingAssistant;
   enabledAssistants?: CodingAssistant[];
+  codexBoard?: CodexBoardSettings;
 }
 
 export interface SessionContext {
@@ -173,6 +238,9 @@ export interface CardSummary {
   column: KanbanColumn;
   project?: string;
   assistant?: CodingAssistant;
+  executionBinding?: CodexExecutionBinding;
+  lifecycle?: CodexRuntimeState["lifecycle"];
+  needsAttention?: boolean;
   sessionId?: string;
   tmuxSession?: string;
   tmuxAlive: boolean;

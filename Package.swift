@@ -9,6 +9,7 @@ let package = Package(
     products: [
         .executable(name: "KanbanCode", targets: ["KanbanCode"]),
         .executable(name: "kanban-code-active-session", targets: ["KanbanCodeActiveSession"]),
+        .executable(name: "kanban-code-lifecycle", targets: ["KanbanCodeLifecycle"]),
         .library(name: "KanbanCodeCore", targets: ["KanbanCodeCore"]),
     ],
     dependencies: [
@@ -26,6 +27,11 @@ let package = Package(
         .executableTarget(
             name: "KanbanCodeActiveSession",
             path: "Sources/KanbanCodeActiveSession"
+        ),
+        .executableTarget(
+            name: "KanbanCodeLifecycle",
+            dependencies: ["KanbanCodeCore"],
+            path: "Sources/KanbanCodeLifecycle"
         ),
         .target(
             name: "KanbanCodeCore",

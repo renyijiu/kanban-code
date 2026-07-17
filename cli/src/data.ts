@@ -26,8 +26,9 @@ import {
   CardDetail,
   TranscriptTurn,
   KanbanColumn,
+  CodexRuntimeState,
 } from "./types.js";
-import { linksPath, settingsPath, contextDir, claudeProjectsDir } from "./paths.js";
+import { linksPath, settingsPath, contextDir, claudeProjectsDir, codexRuntimeStatePath } from "./paths.js";
 
 // ── Reading state files ──────────────────────────────────────────────
 
@@ -46,6 +47,36 @@ export function readSettings(): Settings {
   if (!existsSync(path))
     return { projects: [] };
   return JSON.parse(readFileSync(path, "utf-8"));
+}
+
+export function readCodexRuntimeStates(): Record<string, CodexRuntimeState> {
+  const path = codexRuntimeStatePath();
+  if (!existsSync(path)) return {};
+  try {
+    const raw = JSON.parse(readFileSync(path, "utf-8"));
+    return raw && raw.states && typeof raw.states === "object" ? raw.states : {};
+  } catch {
+    return {};
+  }
+}
+
+export function applyCodexRuntimeProjection(
+  links: Link[],
+  states: Record<string, CodexRuntimeState> = readCodexRuntimeStates()
+): Link[] {
+  const columns: Partial<Record<CodexRuntimeState["lifecycle"]["phase"], KanbanColumn>> = {
+    queued: "backlog",
+    launching: "in_progress",
+    running: "in_progress",
+    waiting: "requires_attention",
+    inReview: "in_review",
+    done: "done",
+  };
+  return links.map((link) => {
+    const state = states[link.id];
+    const column = state ? columns[state.lifecycle.phase] : undefined;
+    return column ? { ...link, column } : link;
+  });
 }
 
 // ── Session context (tokens/cost) ────────────────────────────────────
@@ -544,18 +575,23 @@ function projectName(link: Link): string | undefined {
 
 export function toCardSummary(
   link: Link,
-  liveTmux: Set<string>
+  liveTmux: Set<string>,
+  runtimeStates: Record<string, CodexRuntimeState> = readCodexRuntimeStates()
 ): CardSummary {
   const tmuxName = link.tmuxLink?.sessionName;
   const ctx = link.sessionLink?.sessionId
     ? readSessionContext(link.sessionLink.sessionId)
     : undefined;
+  const lifecycle = runtimeStates[link.id]?.lifecycle;
   return {
     id: link.id,
     name: displayTitle(link),
     column: link.column,
     project: projectName(link),
     assistant: link.assistant,
+    executionBinding: link.executionBinding,
+    lifecycle,
+    needsAttention: lifecycle?.phase === "waiting",
     sessionId: link.sessionLink?.sessionId,
     tmuxSession: tmuxName,
     tmuxAlive: tmuxName ? liveTmux.has(tmuxName) : false,
@@ -589,9 +625,10 @@ export function toCardSummary(
 export function toCardDetail(
   link: Link,
   liveTmux: Set<string>,
-  transcriptTurns: number = 3
+  transcriptTurns: number = 3,
+  runtimeStates: Record<string, CodexRuntimeState> = readCodexRuntimeStates()
 ): CardDetail {
-  const summary = toCardSummary(link, liveTmux);
+  const summary = toCardSummary(link, liveTmux, runtimeStates);
   const transcript = link.sessionLink?.sessionPath
     ? readLastTranscriptTurns(link.sessionLink.sessionPath, transcriptTurns)
     : [];

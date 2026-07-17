@@ -18,6 +18,8 @@ make run-app         # build + launch the app
   - All mutations go through `store.dispatch(action)` → pure `Reducer` → async `Effect`s.
   - `isLaunching` flag on `Link` prevents background reconciliation from overriding cards mid-launch/resume.
   - Never mutate state directly or write to `CoordinationStore` from views — always dispatch an action.
+- Shared project vocabulary lives in [`CONCEPTS.md`](CONCEPTS.md).
+- Durable implementation learnings live under [`docs/solutions/`](docs/solutions/).
 
 ## Critical: DispatchSource + @MainActor Crashes
 

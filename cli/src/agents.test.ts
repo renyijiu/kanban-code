@@ -116,6 +116,28 @@ describe("cards: persistence (sandboxed)", () => {
     assert.equal(findCardByName("x-renamed")?.id, "card_x");
   });
 
+  test("upsertCard preserves runtime and unknown fields from newer clients", () => {
+    const existing = {
+      ...makeCard("card_runtime", "before"),
+      executionBinding: {
+        backend: "app",
+        ownership: "managed",
+        evidence: "boardCreated",
+        telemetryQuality: "precise",
+        threadId: "thread_123",
+      },
+      futureMacField: { nested: [1, { kept: true }] },
+    };
+    writeLinks([existing as Link]);
+
+    upsertCard(makeCard("card_runtime", "after"));
+
+    const raw = JSON.parse(readFileSync(join(home, "links.json"), "utf-8"));
+    assert.equal(raw.links[0].name, "after");
+    assert.equal(raw.links[0].executionBinding.threadId, "thread_123");
+    assert.equal(raw.links[0].futureMacField.nested[1].kept, true);
+  });
+
   test("a daily backup is rotated on overwrite", () => {
     writeLinks([makeCard("card_1", "a")]);
     writeLinks([makeCard("card_1", "a"), makeCard("card_2", "b")]);

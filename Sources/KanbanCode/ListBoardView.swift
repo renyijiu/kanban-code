@@ -35,13 +35,14 @@ struct ListBoardView: View {
     var canDropCard: (KanbanCodeCard, KanbanCodeColumn) -> Bool = { _, _ in true }
     var onNewTask: () -> Void = {}
     var onCardClicked: (String) -> Void = { _ in }
+    var onOpenRuntimeSession: (String) -> Void = { _ in }
     var onRenameCard: (String, String) -> Void = { _, _ in } // (cardId, newName)
     var inSidebar: Bool = false
     @AppStorage("listBoardCollapsedColumns") private var collapsedColumnsRaw = ""
 
     private var sections: [ListBoardSection] {
         ListBoardSection.make(columns: store.state.visibleColumns) { column in
-            store.state.unpinnedCards(in: column)
+            store.state.codexBoardCards(in: column).filter { !$0.link.isPinned }
         }
     }
 
@@ -60,7 +61,7 @@ struct ListBoardView: View {
             set: { if !$0 { renamingPinnedCardId = nil } }
         )) {
             if let cardId = renamingPinnedCardId,
-               let card = store.state.pinnedCards.first(where: { $0.id == cardId }) {
+               let card = store.state.codexBoardCards.first(where: { $0.id == cardId && $0.link.isPinned }) {
                 RenameSessionDialog(
                     currentName: card.link.name ?? card.displayTitle,
                     isPresented: Binding(
@@ -96,7 +97,7 @@ struct ListBoardView: View {
 
     @ViewBuilder
     private var pinnedCardsSection: some View {
-        let cards = store.state.pinnedCards
+        let cards = store.state.codexBoardCards.filter(\.link.isPinned)
         if !cards.isEmpty {
             VStack(alignment: .leading, spacing: 4) {
                 HStack(spacing: 6) {
@@ -158,7 +159,8 @@ struct ListBoardView: View {
             onMoveToFolder: { onMoveToFolder(card.id) },
             enabledAssistants: enabledAssistants,
             onMigrateAssistant: { target in onMigrateAssistant(card.id, target) },
-            onRenameRequest: { renamingPinnedCardId = card.id }
+            onRenameRequest: { renamingPinnedCardId = card.id },
+            onOpenRuntimeSession: { onOpenRuntimeSession(card.id) }
         )
     }
 
@@ -257,6 +259,7 @@ struct ListBoardView: View {
                 store.dispatch(.reorderCard(cardId: cardId, targetCardId: targetCardId, above: above))
             },
             onRenameCard: onRenameCard,
+            onOpenRuntimeSession: onOpenRuntimeSession,
             onToggleCollapse: { toggleCollapse(for: section.column) }
         )
     }
@@ -308,16 +311,16 @@ struct ListBoardView: View {
 
     @ViewBuilder
     private var emptyStateOverlay: some View {
-        if store.state.filteredCards.isEmpty && !store.state.isLoading {
+        if store.state.codexBoardCards.isEmpty && !store.state.isLoading {
             VStack(spacing: 12) {
                 if let projectPath = store.state.selectedProjectPath {
                     let name = store.state.configuredProjects.first(where: { $0.path == projectPath })?.name
                         ?? (projectPath as NSString).lastPathComponent
-                    Text("No sessions yet for \(name)")
+                    Text("No \(store.state.codexBoardRuntime.boardLabel) sessions yet for \(name)")
                         .font(.app(.title3))
                         .foregroundStyle(.secondary)
                 } else {
-                    Text("No sessions found")
+                    Text("No \(store.state.codexBoardRuntime.boardLabel) sessions found")
                         .font(.app(.title3))
                         .foregroundStyle(.secondary)
                 }
@@ -364,6 +367,7 @@ private struct ListBoardSectionView: View {
     let canDropCard: (KanbanCodeCard, KanbanCodeColumn) -> Bool
     let onReorderCard: (String, String, Bool) -> Void
     let onRenameCard: (String, String) -> Void
+    let onOpenRuntimeSession: (String) -> Void
     @State private var renamingCardId: String?
     let onToggleCollapse: () -> Void
 
@@ -485,7 +489,8 @@ private struct ListBoardSectionView: View {
                         onMoveToFolder: { onMoveToFolder(card.id) },
                         enabledAssistants: enabledAssistants,
                         onMigrateAssistant: { target in onMigrateAssistant(card.id, target) },
-                        onRenameRequest: { renamingCardId = card.id }
+                        onRenameRequest: { renamingCardId = card.id },
+                        onOpenRuntimeSession: { onOpenRuntimeSession(card.id) }
                     )
                     .opacity(dragState.draggingCard?.id == card.id ? 0.65 : 1)
                     .overlay(
@@ -750,6 +755,7 @@ private struct ListCardRowView: View {
     var enabledAssistants: [CodingAssistant] = []
     var onMigrateAssistant: (CodingAssistant) -> Void = { _ in }
     var onRenameRequest: () -> Void = {}
+    var onOpenRuntimeSession: () -> Void = {}
 
     var body: some View {
         HStack(alignment: .center, spacing: 8) {
@@ -776,6 +782,14 @@ private struct ListCardRowView: View {
                 // Row 2: metadata badges
                 HStack(spacing: 6) {
                     CardBadgesRow(card: card)
+
+                    if card.link.effectiveAssistant == .codex {
+                        Button(action: onOpenRuntimeSession) {
+                            RuntimeTelemetryBadge(executionBinding: card.link.executionBinding)
+                        }
+                        .buttonStyle(.plain)
+                        .help("Open original Codex session")
+                    }
 
                     if let projectName = card.projectName {
                         Label(projectName, systemImage: "folder")
@@ -836,7 +850,8 @@ private struct ListCardRowView: View {
                     onDelete: onDelete,
                     onMoveToProject: onMoveToProject,
                     onMoveToFolder: onMoveToFolder,
-                    onMigrateAssistant: onMigrateAssistant
+                    onMigrateAssistant: onMigrateAssistant,
+                    onOpenRuntimeSession: onOpenRuntimeSession
                 ),
                 availableProjects: availableProjects,
                 enabledAssistants: enabledAssistants

@@ -71,6 +71,13 @@ public final class AppState: @unchecked Sendable {
     public var isLoading: Bool = false
     public var lastRefresh: Date?
 
+    /// Runtime selected for the five workflow lanes. Changing this projection
+    /// never starts, stops or migrates an existing session.
+    public var codexBoardRuntime: CodexRuntimeBackend = .cliTmux
+
+    /// Swift-owned canonical lifecycle state, loaded independently from links.json.
+    public var codexRuntimeStates: [String: CardRuntimeState] = [:]
+
     /// Configured projects (refreshed from settings on each reconciliation).
     public var configuredProjects: [Project] = []
     /// Cached excluded paths for global view.
@@ -222,6 +229,15 @@ public final class AppState: @unchecked Sendable {
     /// Visible columns — cached for independent observation.
     public internal(set) var visibleColumns: [KanbanCodeColumn] = []
 
+    /// Mode-filtered Codex cards for the five-lane board. `filteredCards` stays
+    /// available to legacy search and All Sessions surfaces.
+    public internal(set) var codexBoardCards: [KanbanCodeCard] = []
+
+    public internal(set) var codexBoardCardsByColumn: [KanbanCodeColumn: [KanbanCodeCard]] = [:]
+
+    /// Global attention crosses runtime and project filters by design.
+    public internal(set) var attentionItems: [AttentionItem] = []
+
     /// Cards presented above the normal lanes while retaining their real column.
     public internal(set) var pinnedCards: [KanbanCodeCard] = []
 
@@ -232,7 +248,20 @@ public final class AppState: @unchecked Sendable {
             let session = link.sessionLink.flatMap { sessions[$0.sessionId] }
             let activity = link.sessionLink.flatMap { activityMap[$0.sessionId] }
             let rateLimited = link.projectPath.map { rateLimitedRepos.contains($0) } ?? false
-            return KanbanCodeCard(link: link, session: session, activityState: activity, isBusy: busyCards.contains(link.id), isRateLimited: rateLimited)
+            var projectedLink = link
+            if projectedLink.executionBinding == nil,
+               let recoveredBinding = codexRuntimeStates[link.id]?.executionBinding {
+                projectedLink.executionBinding = recoveredBinding
+            }
+            if link.effectiveAssistant == .codex || codexRuntimeStates[link.id] != nil {
+                projectedLink.column = CodexBoardProjection.column(
+                    for: link,
+                    runtimeState: codexRuntimeStates[link.id],
+                    legacyActivity: activity,
+                    hasLiveWork: link.tmuxLink.map { tmuxSessions.contains($0.sessionName) } ?? false
+                )
+            }
+            return KanbanCodeCard(link: projectedLink, session: session, activityState: activity, isBusy: busyCards.contains(link.id), isRateLimited: rateLimited)
         }
         if newCards != cards { cards = newCards }
 
@@ -275,15 +304,34 @@ public final class AppState: @unchecked Sendable {
         }
         if newByColumn != cardsByColumn { cardsByColumn = newByColumn }
 
-        let alwaysVisible: [KanbanCodeColumn] = [.backlog, .inProgress, .waiting, .inReview, .done]
-        var newVisible = alwaysVisible
-        if (newByColumn[.allSessions]?.count ?? 0) > 0 { newVisible.append(.allSessions) }
+        let newVisible = CodexBoardProjection.lanes
         if newVisible != visibleColumns { visibleColumns = newVisible }
+
+        let newBoardCards = newFiltered.filter {
+            CodexBoardProjection.matchesBoardRuntime($0.link, runtime: codexBoardRuntime)
+        }
+        if newBoardCards != codexBoardCards { codexBoardCards = newBoardCards }
+
+        var newBoardByColumn: [KanbanCodeColumn: [KanbanCodeCard]] = [:]
+        for column in CodexBoardProjection.lanes {
+            newBoardByColumn[column] = newBoardCards.filter { $0.column == column }
+        }
+        if newBoardByColumn != codexBoardCardsByColumn { codexBoardCardsByColumn = newBoardByColumn }
+
+        let newAttention = CodexBoardProjection.attentionItems(
+            links: links,
+            runtimeStates: codexRuntimeStates
+        )
+        if newAttention != attentionItems { attentionItems = newAttention }
     }
 
     /// Cards for a specific column (pre-computed, cached).
     public func cards(in column: KanbanCodeColumn) -> [KanbanCodeCard] {
         cardsByColumn[column] ?? []
+    }
+
+    public func codexBoardCards(in column: KanbanCodeColumn) -> [KanbanCodeCard] {
+        codexBoardCardsByColumn[column] ?? []
     }
 
     /// Lane presentation excludes pinned cards, but their underlying column is unchanged.
@@ -410,6 +458,10 @@ public enum Action: Sendable {
     case reconciled(ReconciliationResult)
     case gitHubIssuesUpdated(links: [Link])
     case activityChanged([String: ActivityState]) // sessionId → state
+    case codexRuntimeStatesLoaded([String: CardRuntimeState])
+    case codexRuntimeStateChanged(CardRuntimeState)
+    case bindCodexRuntime(cardId: String, binding: CodexExecutionBinding)
+    case setCodexBoardRuntime(CodexRuntimeBackend)
 
     // Busy state (transient spinners)
     case setBusy(cardId: String, busy: Bool)
@@ -521,6 +573,8 @@ public enum Effect: Sendable {
     case sendPromptToTmux(sessionName: String, promptBody: String, assistant: CodingAssistant)
     case sendPromptWithImagesToTmux(sessionName: String, promptBody: String, imagePaths: [String], assistant: CodingAssistant)
     case deleteFiles([String])
+    case rekeyCodexRuntimeState(sourceCardId: String, targetCardId: String)
+    case upsertCodexRuntimeState(CardRuntimeState)
 
     // Channels
     case loadChannels
@@ -1596,6 +1650,18 @@ public enum Reducer {
                 state.error = "Cannot merge: both cards have different issues"
                 return []
             }
+            if let sourceBinding = source.executionBinding,
+               let targetBinding = target.executionBinding,
+               sourceBinding != targetBinding {
+                state.error = "Cannot merge: both cards have different Codex runtime bindings"
+                return []
+            }
+            if let sourceRuntime = state.codexRuntimeStates[sourceId],
+               let targetRuntime = state.codexRuntimeStates[targetId],
+               sourceRuntime.executionBinding != targetRuntime.executionBinding {
+                state.error = "Cannot merge: both cards have different Codex runtime state"
+                return []
+            }
 
             // Transfer links from source → target (only fill nil slots)
             if target.sessionLink == nil { target.sessionLink = source.sessionLink }
@@ -1605,6 +1671,7 @@ public enum Reducer {
             if target.projectPath == nil { target.projectPath = source.projectPath }
             if target.name == nil { target.name = source.name }
             if target.promptBody == nil { target.promptBody = source.promptBody }
+            if target.executionBinding == nil { target.executionBinding = source.executionBinding }
             if target.pinnedAt == nil {
                 target.pinnedAt = source.pinnedAt
                 target.pinnedSortOrder = source.pinnedSortOrder
@@ -1645,8 +1712,17 @@ public enum Reducer {
             }
             if state.selectedCardId == sourceId { state.selectedCardId = targetId }
 
+            var effects: [Effect] = [.upsertLink(target), .removeLink(sourceId)]
+            if var runtime = state.codexRuntimeStates.removeValue(forKey: sourceId) {
+                runtime.cardId = targetId
+                if state.codexRuntimeStates[targetId] == nil {
+                    state.codexRuntimeStates[targetId] = runtime
+                }
+                effects.append(.rekeyCodexRuntimeState(sourceCardId: sourceId, targetCardId: targetId))
+            }
+
             KanbanCodeLog.info("store", "Merge: \(sourceId.prefix(12)) → \(targetId.prefix(12))")
-            return [.upsertLink(target), .removeLink(sourceId)]
+            return effects
 
         // MARK: Async Completions
 
@@ -1982,6 +2058,9 @@ public enum Reducer {
             // Lightweight column update — no full reconciliation, just activity → column
             var changed = false
             for (id, var link) in state.links where link.isLaunching != true {
+                // Canonical lifecycle is authoritative once available. Legacy
+                // mtime/activity heuristics must not overwrite it.
+                if state.codexRuntimeStates[id] != nil { continue }
                 guard let sessionId = link.sessionLink?.sessionId,
                       let activity = activityMap[sessionId] else { continue }
                 let hasWorktree = link.worktreeLink?.branch != nil
@@ -1994,6 +2073,34 @@ public enum Reducer {
             }
             if state.activityMap != activityMap { state.activityMap = activityMap }
             return changed ? [.persistLinks(Array(state.links.values))] : []
+
+        case .codexRuntimeStatesLoaded(let runtimeStates):
+            guard state.codexRuntimeStates != runtimeStates else { return [] }
+            state.codexRuntimeStates = runtimeStates
+            state.rebuildCards()
+            return []
+
+        case .codexRuntimeStateChanged(let runtimeState):
+            guard state.codexRuntimeStates[runtimeState.cardId] != runtimeState else { return [] }
+            state.codexRuntimeStates[runtimeState.cardId] = runtimeState
+            state.rebuildCards()
+            return [.upsertCodexRuntimeState(runtimeState)]
+
+        case .bindCodexRuntime(let cardId, let binding):
+            guard var link = state.links[cardId] else { return [] }
+            link.assistant = .codex
+            link.executionBinding = binding
+            if binding.backend == .cliTmux, let sessionName = binding.tmuxSessionName {
+                link.tmuxLink = TmuxLink(sessionName: sessionName)
+            }
+            link.updatedAt = .now
+            state.links[cardId] = link
+            return [.upsertLink(link)]
+
+        case .setCodexBoardRuntime(let runtime):
+            guard runtime != .unknown else { return [] }
+            state.codexBoardRuntime = runtime
+            return []
 
         // MARK: Busy State
 
@@ -2094,6 +2201,7 @@ public final class BoardStore: @unchecked Sendable {
     private let ghAdapter: GhCliAdapter?
     private let worktreeAdapter: GitWorktreeAdapter?
     private let tmuxAdapter: TmuxManagerPort?
+    private let codexRuntimeStateStore: CodexRuntimeStateStore
 
     public let sessionStore: SessionStore
 
@@ -2106,7 +2214,8 @@ public final class BoardStore: @unchecked Sendable {
         ghAdapter: GhCliAdapter? = nil,
         worktreeAdapter: GitWorktreeAdapter? = nil,
         tmuxAdapter: TmuxManagerPort? = nil,
-        sessionStore: SessionStore = ClaudeCodeSessionStore()
+        sessionStore: SessionStore = ClaudeCodeSessionStore(),
+        codexRuntimeStateStore: CodexRuntimeStateStore = CodexRuntimeStateStore()
     ) {
         self.state = AppState()
         self.effectHandler = effectHandler
@@ -2118,12 +2227,14 @@ public final class BoardStore: @unchecked Sendable {
         self.worktreeAdapter = worktreeAdapter
         self.tmuxAdapter = tmuxAdapter
         self.sessionStore = sessionStore
+        self.codexRuntimeStateStore = codexRuntimeStateStore
     }
 
     /// Actions that only toggle UI state and don't affect card data — skip rebuildCards().
     private static func needsRebuild(_ action: Action) -> Bool {
         switch action {
-        case .reconciled, .setRateLimitedRepos:
+        case .reconciled, .setRateLimitedRepos,
+             .codexRuntimeStatesLoaded, .codexRuntimeStateChanged:
             // These reducers diff their card inputs and rebuild only when the
             // derived card snapshots can actually change. A periodic PR/status
             // pass that produces the same links must not relayout the board.
@@ -2272,7 +2383,11 @@ public final class BoardStore: @unchecked Sendable {
                     excludedPaths: settings.globalView.excludedPaths,
                     remote: settings.remote
                 ))
+                dispatch(.setCodexBoardRuntime(settings.codexBoard.runtime))
             }
+        }
+        if let runtimeStates = try? await codexRuntimeStateStore.readAll() {
+            dispatch(.codexRuntimeStatesLoaded(runtimeStates))
         }
         // Also load cached links so cards appear instantly
         if state.links.isEmpty {
@@ -2579,6 +2694,27 @@ public final class BoardStore: @unchecked Sendable {
                 globalRemoteSettings: globalRemoteSettings
             )
             dispatch(.reconciled(result))
+            // App Server discovery supplies structured status for imported
+            // threads. Persist it under the reconciled card ID so subsequent
+            // notifications and the global attention strip share one source
+            // of truth with board-created work.
+            let linkBySessionID = Dictionary(
+                state.links.values.compactMap { link in
+                    link.sessionLink.map { ($0.sessionId, link) }
+                },
+                uniquingKeysWith: { current, _ in current }
+            )
+            for session in sessions where session.assistant == .codex {
+                guard let lifecycle = session.runtimeLifecycle,
+                      let link = linkBySessionID[session.id],
+                      state.codexRuntimeStates[link.id]?.launchLease == nil else { continue }
+                dispatch(.codexRuntimeStateChanged(CardRuntimeState(
+                    cardId: link.id,
+                    lifecycle: lifecycle,
+                    executionBinding: link.executionBinding,
+                    updatedAt: .now
+                )))
+            }
             KanbanCodeLog.info("reconcile", "dispatch: \(t5.duration(to: .now))")
 
             // Fetch GitHub issues if enough time has elapsed

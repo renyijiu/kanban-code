@@ -77,7 +77,10 @@ function rotateDailyBackup(file: string): void {
 export function upsertCard(card: Link): void {
   const links = readLinks();
   const index = links.findIndex((l) => l.id === card.id);
-  if (index >= 0) links[index] = card;
+  // Preserve fields written by newer clients that this CLI does not type yet.
+  // In particular, the CLI must not erase Swift-owned runtime metadata when an
+  // agent launch updates the same card with an older-shaped Link object.
+  if (index >= 0) links[index] = { ...links[index], ...card };
   else links.push(card);
   writeLinks(links);
 }

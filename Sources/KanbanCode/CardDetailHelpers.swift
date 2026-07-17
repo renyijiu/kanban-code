@@ -30,6 +30,10 @@ struct CardActionsMenuActions {
     let onMoveToProject: (String) -> Void
     let onMoveToFolder: () -> Void
     let onMigrateAssistant: (CodingAssistant) -> Void
+    let onOpenRuntimeSession: (() -> Void)?
+    let onMarkReviewReady: (() -> Void)?
+    let onAcceptReview: (() -> Void)?
+    let onContinueReview: (() -> Void)?
 
     init(
         onStart: @escaping () -> Void,
@@ -49,7 +53,11 @@ struct CardActionsMenuActions {
         onDelete: @escaping () -> Void,
         onMoveToProject: @escaping (String) -> Void,
         onMoveToFolder: @escaping () -> Void,
-        onMigrateAssistant: @escaping (CodingAssistant) -> Void
+        onMigrateAssistant: @escaping (CodingAssistant) -> Void,
+        onOpenRuntimeSession: (() -> Void)? = nil,
+        onMarkReviewReady: (() -> Void)? = nil,
+        onAcceptReview: (() -> Void)? = nil,
+        onContinueReview: (() -> Void)? = nil
     ) {
         self.onStart = onStart
         self.onResume = onResume
@@ -69,6 +77,10 @@ struct CardActionsMenuActions {
         self.onMoveToProject = onMoveToProject
         self.onMoveToFolder = onMoveToFolder
         self.onMigrateAssistant = onMigrateAssistant
+        self.onOpenRuntimeSession = onOpenRuntimeSession
+        self.onMarkReviewReady = onMarkReviewReady
+        self.onAcceptReview = onAcceptReview
+        self.onContinueReview = onContinueReview
     }
 }
 
@@ -89,6 +101,13 @@ struct CardActionsMenu: View {
 
         // Primary actions
         primaryActions
+
+        if let onOpenRuntimeSession = actions.onOpenRuntimeSession,
+           card.link.effectiveAssistant == .codex {
+            Button(action: onOpenRuntimeSession) {
+                Label("Open Original Codex Session", systemImage: "arrow.up.forward.app")
+            }
+        }
 
         Divider()
 
@@ -186,6 +205,24 @@ struct CardActionsMenu: View {
 
     @ViewBuilder
     private var primaryActions: some View {
+        if (card.column == .inProgress || card.column == .waiting),
+           let onMarkReviewReady = actions.onMarkReviewReady {
+            Button(action: onMarkReviewReady) {
+                Label("Mark Ready for Review", systemImage: "checkmark.bubble")
+            }
+        }
+        if card.column == .inReview {
+            if let onAcceptReview = actions.onAcceptReview {
+                Button(action: onAcceptReview) {
+                    Label("Complete Review", systemImage: "checkmark.circle")
+                }
+            }
+            if let onContinueReview = actions.onContinueReview {
+                Button(action: onContinueReview) {
+                    Label("Continue with Feedback", systemImage: "arrow.uturn.backward.circle")
+                }
+            }
+        }
         if card.column == .backlog {
             Button(action: actions.onStart) {
                 Label("Start", systemImage: "play.fill")

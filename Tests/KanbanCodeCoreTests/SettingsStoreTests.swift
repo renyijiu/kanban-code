@@ -26,10 +26,45 @@ struct SettingsStoreTests {
         #expect(settings.github.pollIntervalSeconds == 60)
         #expect(settings.sessionTimeout.activeThresholdMinutes == 1440)
         #expect(settings.promptTemplate == "")
+        #expect(settings.codexBoard.runtime == .cliTmux)
+        #expect(settings.codexBoard.maxConcurrency == 3)
 
         // File should exist now
         let filePath = (dir as NSString).appendingPathComponent("settings.json")
         #expect(FileManager.default.fileExists(atPath: filePath))
+    }
+
+    @Test("Codex board settings clamp concurrency and round-trip")
+    func codexBoardSettingsRoundTrip() async throws {
+        let dir = try makeTempDir()
+        defer { cleanup(dir) }
+        let store = SettingsStore(basePath: dir)
+
+        var settings = Settings()
+        settings.codexBoard.runtime = .app
+        settings.codexBoard.maxConcurrency = 100
+        #expect(settings.codexBoard.maxConcurrency == 32)
+        try await store.write(settings)
+
+        let read = try await store.read()
+        #expect(read.codexBoard.runtime == .app)
+        #expect(read.codexBoard.maxConcurrency == 32)
+    }
+
+    @Test("Missing and invalid Codex board settings use safe defaults")
+    func codexBoardSettingsBackwardCompatibility() throws {
+        let missing = try JSONDecoder().decode(Settings.self, from: Data("{}".utf8))
+        #expect(missing.codexBoard.runtime == .cliTmux)
+        #expect(missing.codexBoard.maxConcurrency == 3)
+
+        let invalid = try JSONDecoder().decode(
+            Settings.self,
+            from: Data("""
+            { "codexBoard": { "runtime": "futureRuntime", "maxConcurrency": 0 } }
+            """.utf8)
+        )
+        #expect(invalid.codexBoard.runtime == .unknown)
+        #expect(invalid.codexBoard.maxConcurrency == 1)
     }
 
     @Test("Write and read round-trip")

@@ -29,6 +29,8 @@ Productive Mode:
 
 A native macOS app for running multiple Claude Code agents in parallel. Each task is a card on a Kanban board that automatically links your Claude session, git worktree, tmux terminals, and GitHub PR together — cards flow from backlog to done as Claude works, opens PRs, and gets them merged. Push notifications on your phone when agents need attention, remote execution to offload work to a server, and sleep prevention to keep your Mac awake while agents run.
 
+Codex sessions can use either **Codex App** or **Codex CLI + tmux** as a board-level runtime. A global attention strip surfaces sessions waiting for approval or input across both modes, while structured lifecycle events move cards through the five-stage workflow. See [Codex session board](docs/codex-board.md) for capabilities, setup, local files and degraded-operation behavior.
+
 Kanban Code's goal is to ease as much as possible the context switching bottleneck for modern development by centralizing all context needed for each Claude session into their cards.
 
 Kanban Code combines the lessons learned from [claude-resume](https://github.com/langwatch/claude-resume), [claude-remote](https://github.com/langwatch/claude-remote), [git-orchard](https://github.com/drewdrewthis/git-orchard), [claude-pushover](https://github.com/langwatch/claude-pushover), and [cc-amphetamine](https://github.com/rogeriochaves/cc-amphetamine) into one unified experience.

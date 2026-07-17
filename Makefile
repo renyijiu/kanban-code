@@ -1,4 +1,4 @@
-.PHONY: build test run app run-app run-release clean cli install-cli web
+.PHONY: build test run app archive run-app run-release clean cli install-cli web
 
 BUNDLE_NAME = KanbanCode.app
 BUNDLE_DIR = build/$(BUNDLE_NAME)
@@ -25,11 +25,16 @@ run:
 app: build cli install-cli web
 	@mkdir -p $(BUNDLE_DIR)/Contents/MacOS
 	@mkdir -p $(BUNDLE_DIR)/Contents/Resources
+	@mkdir -p $(BUNDLE_DIR)/Contents/Helpers
 	@cp $(BUILD_DIR)/KanbanCode $(BUNDLE_DIR)/Contents/MacOS/KanbanCode
+	@cp $(BUILD_DIR)/kanban-code-lifecycle $(BUNDLE_DIR)/Contents/Helpers/kanban-code-lifecycle
+	@chmod 755 $(BUNDLE_DIR)/Contents/Helpers/kanban-code-lifecycle
+	@shasum -a 256 $(BUNDLE_DIR)/Contents/Helpers/kanban-code-lifecycle | awk '{print $$1}' > $(BUNDLE_DIR)/Contents/Resources/codex-lifecycle.sha256
 	@# Active session marker app (detected by Amphetamine etc.)
 	@mkdir -p $(BUNDLE_DIR)/Contents/Helpers/kanban-code-active-session.app/Contents/MacOS
 	@cp $(BUILD_DIR)/kanban-code-active-session $(BUNDLE_DIR)/Contents/Helpers/kanban-code-active-session.app/Contents/MacOS/kanban-code-active-session
 	@/bin/echo '<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd"><plist version="1.0"><dict><key>CFBundleExecutable</key><string>kanban-code-active-session</string><key>CFBundleIdentifier</key><string>com.kanban-code.active-session</string><key>CFBundleName</key><string>kanban-code-active-session</string><key>CFBundlePackageType</key><string>APPL</string><key>CFBundleVersion</key><string>$(VERSION)</string><key>LSUIElement</key><true/></dict></plist>' > $(BUNDLE_DIR)/Contents/Helpers/kanban-code-active-session.app/Contents/Info.plist
+	@xattr -cr $(BUNDLE_DIR)/Contents/Helpers/kanban-code-active-session.app
 	@codesign --force --sign "$(CODESIGN_IDENTITY)" $(BUNDLE_DIR)/Contents/Helpers/kanban-code-active-session.app
 	@/System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/LaunchServices.framework/Versions/A/Support/lsregister -f $(BUNDLE_DIR)/Contents/Helpers/kanban-code-active-session.app 2>/dev/null || true
 	@cp Sources/KanbanCode/Resources/AppIcon.icns $(BUNDLE_DIR)/Contents/Resources/AppIcon.icns
@@ -42,7 +47,7 @@ app: build cli install-cli web
 	@echo '<key>CFBundleVersion</key><string>$(VERSION)</string>' >> $(BUNDLE_DIR)/Contents/Info.plist
 	@echo '<key>CFBundleShortVersionString</key><string>$(VERSION)</string>' >> $(BUNDLE_DIR)/Contents/Info.plist
 	@echo '<key>CFBundlePackageType</key><string>APPL</string>' >> $(BUNDLE_DIR)/Contents/Info.plist
-	@echo '<key>LSMinimumSystemVersion</key><string>14.0</string>' >> $(BUNDLE_DIR)/Contents/Info.plist
+	@echo '<key>LSMinimumSystemVersion</key><string>26.0</string>' >> $(BUNDLE_DIR)/Contents/Info.plist
 	@echo '<key>NSHighResolutionCapable</key><true/>' >> $(BUNDLE_DIR)/Contents/Info.plist
 	@echo '<key>LSUIElement</key><false/>' >> $(BUNDLE_DIR)/Contents/Info.plist
 	@echo '<key>CFBundleIconFile</key><string>AppIcon</string>' >> $(BUNDLE_DIR)/Contents/Info.plist
@@ -77,10 +82,17 @@ app: build cli install-cli web
 	@cp -R web/dist $(BUNDLE_DIR)/Contents/Resources/share-web
 	@# Code sign so macOS grants notification permissions and Web Inspector can attach
 	@echo "Code signing with: $(CODESIGN_IDENTITY)"
+	@xattr -cr $(BUNDLE_DIR)
 	@codesign --force --sign "$(CODESIGN_IDENTITY)" --entitlements KanbanCode.entitlements $(BUNDLE_DIR)
+	@xattr -cr $(BUNDLE_DIR)
 	@# Register with Launch Services so macOS picks up the icon
 	@/System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/LaunchServices.framework/Versions/A/Support/lsregister -f $(BUNDLE_DIR) 2>/dev/null || true
 	@echo "Built $(BUNDLE_DIR)"
+
+archive: app
+	@mkdir -p build
+	@ditto -c -k --sequesterRsrc --keepParent $(BUNDLE_DIR) build/KanbanCode-$(VERSION)-macos.zip
+	@echo "Built build/KanbanCode-$(VERSION)-macos.zip"
 
 run-app: app
 	open $(BUNDLE_DIR)

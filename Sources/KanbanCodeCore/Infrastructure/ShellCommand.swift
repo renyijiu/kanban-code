@@ -143,4 +143,9 @@ public enum ShellCommand {
         }
         return nil
     }
+
+    /// POSIX-shell single-quote escaping used by launch command builders.
+    public static func shellEscape(_ value: String) -> String {
+        "'" + value.replacingOccurrences(of: "'", with: "'\\''") + "'"
+    }
 }

@@ -7,6 +7,10 @@ public enum DependencyChecker {
         public let claudeAvailable: Bool
         public let geminiAvailable: Bool
         public let codexAvailable: Bool
+        public let codexAppServerAvailable: Bool
+        public let codexDesktopAvailable: Bool
+        public let codexExecutablePath: String?
+        public let codexVersion: String?
         public let hooksInstalled: Bool
         public let pandocAvailable: Bool
         public let wkhtmltoimageAvailable: Bool
@@ -22,6 +26,10 @@ public enum DependencyChecker {
 
         public init(
             claudeAvailable: Bool, geminiAvailable: Bool = false, codexAvailable: Bool = false,
+            codexAppServerAvailable: Bool = false,
+            codexDesktopAvailable: Bool = false,
+            codexExecutablePath: String? = nil,
+            codexVersion: String? = nil,
             hooksInstalled: Bool,
             assistantHooks: [CodingAssistant: Bool] = [:],
             pandocAvailable: Bool,
@@ -33,6 +41,10 @@ public enum DependencyChecker {
             self.claudeAvailable = claudeAvailable
             self.geminiAvailable = geminiAvailable
             self.codexAvailable = codexAvailable
+            self.codexAppServerAvailable = codexAppServerAvailable
+            self.codexDesktopAvailable = codexDesktopAvailable
+            self.codexExecutablePath = codexExecutablePath
+            self.codexVersion = codexVersion
             self.hooksInstalled = hooksInstalled
             self.pandocAvailable = pandocAvailable
             self.wkhtmltoimageAvailable = wkhtmltoimageAvailable
@@ -53,6 +65,12 @@ public enum DependencyChecker {
         async let claude = ShellCommand.isAvailable("claude")
         async let gemini = ShellCommand.isAvailable("gemini")
         async let codex = ShellCommand.isAvailable("codex")
+        async let codexIdentity: CodexExecutableIdentity? = Task.detached(priority: .utility) {
+            try? CodexExecutableResolver.resolve()
+        }.value
+        async let codexDesktop = Task.detached(priority: .utility) {
+            FileManager.default.fileExists(atPath: "/Applications/Codex.app")
+        }.value
         async let pandoc = ShellCommand.isAvailable("pandoc")
         async let wkhtmltoimage = ShellCommand.isAvailable("wkhtmltoimage")
         async let gh = ShellCommand.isAvailable("gh")
@@ -76,10 +94,15 @@ public enum DependencyChecker {
             pushover = false
         }
 
+        let identity = await codexIdentity
         return await Status(
             claudeAvailable: claude,
             geminiAvailable: gemini,
             codexAvailable: codex,
+            codexAppServerAvailable: identity != nil,
+            codexDesktopAvailable: codexDesktop,
+            codexExecutablePath: identity?.url.path,
+            codexVersion: identity?.version,
             hooksInstalled: hooks[.claude] ?? false,
             assistantHooks: hooks,
             pandocAvailable: pandoc,

@@ -23,6 +23,7 @@ struct CardView: View {
     var onMoveToFolder: () -> Void = {}
     var enabledAssistants: [CodingAssistant] = []
     var onMigrateAssistant: (CodingAssistant) -> Void = { _ in }
+    var onOpenRuntimeSession: () -> Void = {}
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -66,6 +67,15 @@ struct CardView: View {
                 Spacer()
 
                 CardBadgesRow(card: card)
+                if card.link.effectiveAssistant == .codex {
+                    Button(action: onOpenRuntimeSession) {
+                        RuntimeTelemetryBadge(executionBinding: card.link.executionBinding)
+                    }
+                    .buttonStyle(.plain)
+                    .help("Open original Codex session")
+                    .accessibilityLabel("Open original Codex session")
+                    .accessibilityValue(card.link.executionBinding?.backend.rawValue ?? "Codex")
+                }
             }
         }
         .padding(10)
@@ -118,7 +128,8 @@ struct CardView: View {
                     onDelete: onDelete,
                     onMoveToProject: onMoveToProject,
                     onMoveToFolder: onMoveToFolder,
-                    onMigrateAssistant: onMigrateAssistant
+                    onMigrateAssistant: onMigrateAssistant,
+                    onOpenRuntimeSession: onOpenRuntimeSession
                 ),
                 availableProjects: availableProjects,
                 enabledAssistants: enabledAssistants
