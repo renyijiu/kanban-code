@@ -27,7 +27,7 @@ deepened: 2026-07-18
 - **Durability and compatibility:** lifecycle、launch lease 与 watermark 独立保存在 Swift-owned runtime store；CLI 只读投影该状态；Swift、TypeScript 与 Rust 的共享 settings/link schema 保持向后兼容，Windows writer 保留未知字段。
 - **App Server realization:** 实现复用 Codex 自带的 `app-server daemon start` + `app-server proxy`，由 Codex daemon 在 UI 生命周期之外持有 runtime；没有重复实现规划草案中的自定义 SMAppService/socket/token companion。客户端仍提供请求关联、allowlist、大小限制、重连和 thread rehydration。
 - **Hook realization:** bundle 内的 lifecycle helper 带 SHA-256 manifest，安装时验证并使用每次 launch 的 capability 绑定 card/session/generation；拒绝安装时保持只读导入和 limited telemetry。
-- **Verification:** `swift build`、879 个 Swift tests、CLI build + 279 tests、Web build + 72 tests、完整 `.app` archive、helper manifest、deep codesign 与 zip integrity 已在本机通过。Rust 工具链本机不可用，`cargo fmt --check` 与 `cargo test --lib` 由新增 Windows CI job 执行。
+- **Verification:** `swift build`、879 个 Swift tests、CLI build + 279 tests、Web build + 72 tests、完整 `.app` archive、helper manifest、deep codesign 与 zip integrity 已在本机通过。Rust compatibility tests 使用隔离在 `/tmp` 的工具链执行；新增 Windows CI job 重跑 `cargo test --lib`。上游 Rust tree 尚未整体通过当前 rustfmt，因此本 PR 不新增一个必然被基线格式阻塞的全仓 format gate。
 - **Credential-gated follow-up:** Developer ID 签名、公证、托管更新和远程通知继续按 Scope Boundaries 延后；本 PR 产出 ad-hoc signed、可复现的本地 archive。
 
 ---
