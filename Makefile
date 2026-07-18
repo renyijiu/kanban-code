@@ -82,11 +82,11 @@ app: build cli install-cli web
 	@cp -R web/dist $(BUNDLE_DIR)/Contents/Resources/share-web
 	@# Code sign so macOS grants notification permissions and Web Inspector can attach
 	@echo "Code signing with: $(CODESIGN_IDENTITY)"
+	@# Register before the final cleanup/sign. Launch Services may attach
+	@# FinderInfo to nested helper apps, which strict codesign rejects.
+	@/System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/LaunchServices.framework/Versions/A/Support/lsregister -f $(BUNDLE_DIR) 2>/dev/null || true
 	@xattr -cr $(BUNDLE_DIR)
 	@codesign --force --sign "$(CODESIGN_IDENTITY)" --entitlements KanbanCode.entitlements $(BUNDLE_DIR)
-	@xattr -cr $(BUNDLE_DIR)
-	@# Register with Launch Services so macOS picks up the icon
-	@/System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/LaunchServices.framework/Versions/A/Support/lsregister -f $(BUNDLE_DIR) 2>/dev/null || true
 	@echo "Built $(BUNDLE_DIR)"
 
 archive: app
