@@ -24,6 +24,8 @@ jobs:
           cache-dependency-path: |
             cli/pnpm-lock.yaml
             web/pnpm-lock.yaml
+      - name: Install tmux for integration tests
+        run: brew install tmux
       - run: swift test
       - run: corepack pnpm install --frozen-lockfile && corepack pnpm run build && corepack pnpm test
         working-directory: cli
