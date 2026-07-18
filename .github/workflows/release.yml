@@ -12,7 +12,9 @@ permissions:
 
 jobs:
   release-please:
-    if: github.event_name == 'push'
+    # Forks do not inherit RELEASE_PAT. Keep their main-branch CI green while
+    # retaining the release-event build job below for fork-owned releases.
+    if: github.event_name == 'push' && github.repository == 'langwatch/kanban-code'
     runs-on: ubuntu-latest
     steps:
       - uses: googleapis/release-please-action@5c625bfb5d1ff62eadeeb3772007f7f66fdcf071 # v4
